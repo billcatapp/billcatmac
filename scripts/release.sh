@@ -1,0 +1,171 @@
+#!/bin/bash
+set -e
+
+# ── Config ───────────────────────────────────────────────────────────────────
+SUPABASE_URL="https://xawpxbhglzhaibmcpwho.supabase.co"
+SUPABASE_SERVICE_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhhd3B4YmhnbHpoYWlibWNwd2hvIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NzExMDgxMywiZXhwIjoyMDkyNjg2ODEzfQ.c3tDKWQeoNsThn0hf1Cq-GBnQgNrFhtx0zS9A6RypO8"
+BUCKET="billcat-updates"
+GITHUB_TOKEN="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"
+GITHUB_REPO="billcatapp/billcat"
+APP_DIR="/Users/fouzehh/Documents/BillCat/app"
+RELEASES_DIR="/Users/fouzehh/Documents/BillCat/releases"
+
+# ── Prompt ───────────────────────────────────────────────────────────────────
+echo ""
+echo "╔══════════════════════════════╗"
+echo "║   BillCat Release Tool 🚀    ║"
+echo "╚══════════════════════════════╝"
+echo ""
+read -p "  New version  (e.g. 1.1.0) : " VERSION
+read -p "  Release notes             : " NOTES
+read -p "  Mandatory update? (y/n)   : " MAND_INPUT
+MANDATORY="false"
+[ "$MAND_INPUT" = "y" ] && MANDATORY="true"
+
+ZIP_NAME="BillCat-$VERSION.zip"
+DMG_NAME="BillCat-$VERSION.dmg"
+mkdir -p "$RELEASES_DIR"
+ZIP_PATH="$RELEASES_DIR/$ZIP_NAME"
+DMG_PATH="$RELEASES_DIR/$DMG_NAME"
+
+# ── 1. Bump version in pubspec.yaml ──────────────────────────────────────────
+echo ""
+echo "[ 1/6 ] Bumping version to $VERSION..."
+CURRENT_BUILD=$(grep "^version:" "$APP_DIR/pubspec.yaml" | grep -oE '\+[0-9]+' | tr -d '+')
+NEW_BUILD=$((CURRENT_BUILD + 1))
+sed -i '' "s/^version: .*/version: $VERSION+$NEW_BUILD/" "$APP_DIR/pubspec.yaml"
+echo "        pubspec.yaml → $VERSION+$NEW_BUILD"
+
+# ── 2. Build release app ─────────────────────────────────────────────────────
+echo "[ 2/6 ] Building release app (this takes ~1 min)..."
+cd "$APP_DIR"
+flutter build macos --release 2>&1 | grep -E "✓|Error|error" || true
+echo "        Build complete"
+
+RELEASE_APP="$APP_DIR/build/macos/Build/Products/Release/BillCat.app"
+
+# ── 3. Create installer DMG (with Applications shortcut) ─────────────────────
+echo "[ 3/6 ] Creating installer DMG..."
+RW_DMG="/tmp/BillCat_rw_$VERSION.dmg"
+rm -f "$RW_DMG"
+
+# Detach any leftover mounts
+hdiutil detach /Volumes/BillCat 2>/dev/null || true
+
+# Create writable DMG
+hdiutil create -size 300m -volname "BillCat" -fs "Journaled HFS+" -ov "$RW_DMG" > /dev/null
+
+# Mount, copy app, add Applications symlink
+hdiutil attach "$RW_DMG" -readwrite -noverify -noautoopen > /dev/null
+cp -R "$RELEASE_APP" /Volumes/BillCat/BillCat.app
+xattr -cr /Volumes/BillCat/BillCat.app
+ln -s /Applications /Volumes/BillCat/Applications
+
+# Style: large icons, BillCat left, Applications right
+osascript << APPLESCRIPT
+tell application "Finder"
+  tell disk "BillCat"
+    open
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set bounds of container window to {100, 100, 700, 420}
+    set theViewOptions to icon view options of container window
+    set arrangement of theViewOptions to not arranged
+    set icon size of theViewOptions to 128
+    delay 1
+    set position of item "BillCat.app" of container window to {160, 160}
+    set position of item "Applications" of container window to {440, 160}
+    update without registering applications
+    delay 2
+    close
+  end tell
+end tell
+APPLESCRIPT
+
+# Finalise
+hdiutil detach /Volumes/BillCat > /dev/null
+sleep 1
+rm -f "$DMG_PATH"
+hdiutil convert "$RW_DMG" -format UDZO -o "$DMG_PATH" > /dev/null
+rm -f "$RW_DMG"
+
+DMG_SIZE=$(du -sh "$DMG_PATH" | cut -f1)
+echo "        $DMG_PATH ($DMG_SIZE)  ← send this to new users"
+
+# ── 4. Create zip for auto-updates ───────────────────────────────────────────
+echo "[ 4/7 ] Creating update zip..."
+cd "$APP_DIR/build/macos/Build/Products/Release"
+zip -qr "$ZIP_PATH" BillCat.app
+ZIP_SIZE=$(du -sh "$ZIP_PATH" | cut -f1)
+echo "        $ZIP_PATH ($ZIP_SIZE)  ← used for silent auto-updates"
+
+# ── 5. Upload zip to GitHub Releases ─────────────────────────────────────────
+echo "[ 5/7 ] Uploading to GitHub Releases..."
+
+# Create the release
+RELEASE_RESPONSE=$(curl -s -X POST \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Content-Type: application/json" \
+  "https://api.github.com/repos/$GITHUB_REPO/releases" \
+  -d "{\"tag_name\":\"v$VERSION\",\"name\":\"BillCat $VERSION\",\"body\":\"$NOTES\",\"draft\":false,\"prerelease\":false}")
+
+RELEASE_ID=$(echo "$RELEASE_RESPONSE" | grep -o '"id": *[0-9]*' | head -1 | grep -o '[0-9]*')
+
+if [ -z "$RELEASE_ID" ]; then
+  echo "        ✗ Failed to create GitHub release"
+  echo "$RELEASE_RESPONSE"
+  exit 1
+fi
+UPLOAD_URL="https://uploads.github.com/repos/$GITHUB_REPO/releases/$RELEASE_ID/assets"
+
+# Upload the zip asset
+ASSET_RESPONSE=$(curl -s -X POST \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Content-Type: application/zip" \
+  "$UPLOAD_URL?name=$ZIP_NAME" \
+  --data-binary @"$ZIP_PATH")
+
+ZIP_URL=$(echo "$ASSET_RESPONSE" | grep -o '"browser_download_url":"[^"]*"' | cut -d'"' -f4)
+
+if [ -z "$ZIP_URL" ]; then
+  echo "        ✗ Failed to upload zip to GitHub"
+  echo "$ASSET_RESPONSE"
+  exit 1
+fi
+echo "        Uploaded → $ZIP_URL"
+
+# ── 6. Update version.json on Supabase ───────────────────────────────────────
+echo "[ 6/7 ] Publishing version.json..."
+VERSION_JSON="{
+  \"version\": \"$VERSION\",
+  \"download_url\": \"$ZIP_URL\",
+  \"release_notes\": \"$NOTES\",
+  \"mandatory\": $MANDATORY
+}"
+
+UPDATE_RESULT=$(echo "$VERSION_JSON" | curl -s -o /dev/null -w "%{http_code}" -X POST \
+  "$SUPABASE_URL/storage/v1/object/$BUCKET/version.json" \
+  -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+  -H "Content-Type: application/json" \
+  -H "x-upsert: true" \
+  --data-binary @-)
+
+if [ "$UPDATE_RESULT" != "200" ] && [ "$UPDATE_RESULT" != "201" ]; then
+  echo "        ✗ version.json update failed (HTTP $UPDATE_RESULT)"
+  exit 1
+fi
+echo "$VERSION_JSON" > "$RELEASES_DIR/version.json"
+
+# ── Done ─────────────────────────────────────────────────────────────────────
+echo ""
+echo "══════════════════════════════════════════════════════"
+echo "  ✅  BillCat v$VERSION released!"
+echo ""
+echo "  📦 New users     → send them $DMG_NAME"
+echo "                     (open DMG → drag to Applications)"
+echo ""
+echo "  🔄 Existing users → update banner appears"
+echo "                     automatically on next launch"
+echo "══════════════════════════════════════════════════════"
+echo ""

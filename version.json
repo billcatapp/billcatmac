@@ -1,0 +1,6 @@
+{
+  "version": "1.0.0-beta",
+  "download_url": "https://github.com/billcatapp/billcat/releases/download/v1.0.0-beta/BillCat-1.0.0-beta.zip",
+  "release_notes": "5 invoice templates (Classic, Simple, Modern, GST, Landscape), cleaner settings UI, instant layout preview, currency moved to General",
+  "mandatory": false
+}
