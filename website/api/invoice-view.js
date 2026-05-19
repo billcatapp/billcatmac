@@ -191,20 +191,31 @@ export default async function handler(req, res) {
   const uidPrefix = uid.toLowerCase();
 
   try {
-    // Query transaction by invoice_number; filter by user_id prefix
-    const txRows = await supabaseGet(
+    let tx = null;
+
+    // First: try to find by invoice_number
+    const byInvoiceNo = await supabaseGet(
       `transactions?invoice_number=eq.${encodeURIComponent(invoiceNo)}&select=*&limit=10`
     );
-
-    if (!txRows || txRows.length === 0) {
-      return res.status(404).send(notFoundHtml());
+    if (byInvoiceNo && byInvoiceNo.length > 0) {
+      tx = byInvoiceNo.find(r => {
+        const stripped = (r.user_id || '').replace(/-/g, '').toLowerCase();
+        return stripped.startsWith(uidPrefix);
+      });
     }
 
-    // Find the row whose user_id starts with the uid prefix (dashes removed)
-    const tx = txRows.find(r => {
-      const stripped = (r.user_id || '').replace(/-/g, '').toLowerCase();
-      return stripped.startsWith(uidPrefix);
-    });
+    // Fallback: search by id prefix (for old transactions with no invoice_number)
+    if (!tx) {
+      const byId = await supabaseGet(
+        `transactions?id=ilike.${encodeURIComponent(invoiceNo)}*&select=*&limit=10`
+      );
+      if (byId && byId.length > 0) {
+        tx = byId.find(r => {
+          const stripped = (r.user_id || '').replace(/-/g, '').toLowerCase();
+          return stripped.startsWith(uidPrefix);
+        });
+      }
+    }
 
     if (!tx) return res.status(404).send(notFoundHtml());
 
