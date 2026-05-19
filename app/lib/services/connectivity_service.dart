@@ -78,6 +78,7 @@ class ConnectivityService extends ChangeNotifier {
               'emoji': p.emoji,
               'sku': p.sku,
               'stock': p.stock,
+              'description': p.description,
             }).toList(),
           );
           for (final p in unsyncedProducts) {
@@ -105,6 +106,7 @@ class ConnectivityService extends ChangeNotifier {
               'payment_method': t.paymentMethod,
               'created_at': t.createdAt.toIso8601String(),
               'items': t.items.map((i) => i.toMap()).toList(),
+              'invoice_number': t.invoiceNumber,
             }).toList(),
           );
           for (final t in unsyncedTx) {
@@ -152,13 +154,23 @@ class ConnectivityService extends ChangeNotifier {
       }
 
       // ── Sync settings ────────────────────────────────────────────────────
+      const _knownSettingsCols = {
+        'store_name', 'store_address', 'store_phone', 'store_email', 'store_gstin',
+        'receipt_footer', 'tax_label', 'tax_rate', 'currency_code', 'currency_symbol',
+        'invoice_layout', 'store_terms', 'store_upi_id', 'branch_number', 'logo_url',
+      };
       final settings = await LocalDbService.getSettings();
       if (settings.isNotEmpty) {
         try {
-          await client.from('user_settings').upsert({
-            'user_id': userId,
-            ...settings,
-          });
+          final filtered = Map.fromEntries(
+            settings.entries.where((e) => _knownSettingsCols.contains(e.key)),
+          );
+          if (filtered.isNotEmpty) {
+            await client.from('user_settings').upsert({
+              'user_id': userId,
+              ...filtered,
+            });
+          }
         } catch (e) {
           debugPrint('Settings sync error: $e');
         }
@@ -192,6 +204,7 @@ class ConnectivityService extends ChangeNotifier {
                 'emoji': r['emoji'],
                 'sku': r['sku'],
                 'stock': r['stock'],
+                'description': (r['description'] as String?) ?? '',
                 'synced': 1,
               }))
           .toList();
