@@ -1,6 +1,7 @@
 {
-  "version": "1.2.6-beta",
-  "download_url": "https://github.com/billcatapp/billcat/releases/download/v1.2.6-beta/BillCat-1.2.6-beta.zip",
-  "release_notes": "Modern 4 invoice template (Times font), fix printer details clearing on restart, Vyapar template removed",
+  "version": "1.4.6",
+  "download_url": "https://github.com/billcatapp/billcat/releases/download/v1.4.6/BillCat-1.4.6.zip",
+  "dmg_url": "https://github.com/billcatapp/billcat/releases/download/v1.4.6/BillCat-1.4.6.dmg",
+  "release_notes": "Bug fixes and improvements",
   "mandatory": false
 }

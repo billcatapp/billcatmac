@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' show max;
 import 'dart:typed_data';
@@ -19,8 +20,11 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/supabase_service.dart';
 import '../../services/update_service.dart';
 import 'package:printing/printing.dart' show Printer, Printing, PdfPreview;
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:barcode/barcode.dart' as bc;
 import '../../services/receipt_printer.dart';
-import '../../widgets/whatsapp_panel.dart';
+import '../../services/whatsapp_service.dart' as _wa;
 import '../auth/login_screen.dart';
 
 const _defaultProducts = <Product>[];
@@ -137,21 +141,27 @@ class _BillingScreenState extends State<BillingScreen> {
   String _selectedCategory = 'All';
   String _searchQuery = '';
   final _searchController = TextEditingController();
+  final _searchFocus = FocusNode();
   int _selectedTab = 1;
   String _inventorySearchQuery = '';
   String _inventoryCategoryFilter = 'All';
-  double _rightPanelWidth = 400;
+  double _rightPanelWidth = 375;
 
   // Reports state
-  String _reportView = 'Sales';
+  String _reportView    = 'Sales';
+  String _utilitiesView = 'Delivery';
   String _salesSearchQuery = '';
   String _customerSearchQuery = '';
   List<Customer> _reportCustomers = [];
   List<Customer> _savedCustomers = [];
+  List<Customer> _nameAcOptions = [];
+  List<Customer> _phoneAcOptions = [];
+  bool _acSkipRefocus = false;
   final _customerNameCtrl = TextEditingController();
   final _customerPhoneCtrl = TextEditingController();
   final _customerNameFocus = FocusNode();
   final _customerPhoneFocus = FocusNode();
+  final _addCustomerFocus = FocusNode();
 
   // Dynamic categories (user can add more)
   List<String> _userCategories = [];
@@ -212,20 +222,35 @@ class _BillingScreenState extends State<BillingScreen> {
   String _storeEmail = '';
   String _storeGstin = '';
   String _logoPath = '';
+  String _logoUrl  = '';
   String _receiptFooter = 'Thank you for your purchase!';
   String _taxLabel = 'GST';
   String _taxRateDisplay = '0';
   String _currencySymbol = '₹';
   String _currencyCode = 'INR';
+  String _dialCode = '+91'; // default India
   String _invoiceLayout = 'Classic';
   String _printOrientation = 'Portrait';
   String _storeTerms = 'Payment due within 30 days. Goods once sold will not be taken back.';
+  String _storeUpiId = '';
+  String _branchNumber = '01';
 
   // Printer state
   String _selectedPrinter = 'System Default';
   Printer? _activePrinter;
   String _paperSize = 'A4';
   bool _autoPrint = false;
+
+  // Barcode print last-used settings
+  double _barcodeLabelW = 58;
+  double _barcodeLabelH = 30;
+  int _barcodePerRow = 1;
+  String _barcodePrinter = 'System Default';
+
+  // Bulk barcode print view
+  Map<String, int> _bulkPrintQtys = {};
+  Map<String, bool> _bulkPrintSelected = {};
+  List<String> _bulkPrinters = ['System Default'];
 
 
   // Top toast
@@ -249,6 +274,7 @@ class _BillingScreenState extends State<BillingScreen> {
   // Settings panel
   bool _showSettings = false;
   bool _isPrinting = false;
+  Timer? _printSafetyTimer;
   bool _addingCustomProduct = false;
   final _customNameCtrl = TextEditingController();
   final _customPriceCtrl = TextEditingController();
@@ -256,11 +282,13 @@ class _BillingScreenState extends State<BillingScreen> {
   String _editStoreName = 'BillCat Store';
   String _editStoreAddress = '';
   String _editLogoPath = '';
+  String _editLogoUrl  = '';
   String _editReceiptFooter = 'Thank you for your purchase!';
   String _editTaxLabel = 'VAT';
   String _editTaxRate = '0';
   String _editCurrencyCode = 'INR';
   String _editCurrencySymbol = '₹';
+  String _editDialCode = '+91';
   String _editPaperSize = 'A4';
   bool _editAutoPrint = false;
   String _editStorePhone = '';
@@ -271,6 +299,15 @@ class _BillingScreenState extends State<BillingScreen> {
   String _editPrinterTab = 'Regular';
   int _previewRevision = 0;
   String _editStoreTerms = 'Payment due within 30 days. Goods once sold will not be taken back.';
+  String _editStoreUpiId = '';
+  String _editBranchNumber = '01';
+
+  // WhatsApp Meta Cloud API
+  String _waPhoneNumberId = '';
+  String _waAccessToken = '';
+  String _editWaPhoneNumberId = '';
+  String _editWaAccessToken = '';
+
 
   List<Product> get _filteredProducts {
     return _products.where((p) {
@@ -284,6 +321,7 @@ class _BillingScreenState extends State<BillingScreen> {
   @override
   void initState() {
     super.initState();
+    _cleanupCupsOptions();
     _loadSettingsFromStorage();
     _loadProducts();
     _loadDashboardData();
@@ -293,6 +331,47 @@ class _BillingScreenState extends State<BillingScreen> {
     _loadCurrentVersion();
     ReceiptPrinter.preWarm();
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncTaxRate());
+    _searchFocus.addListener(() {
+      if (!_searchFocus.hasFocus && mounted) {
+        Future.delayed(const Duration(milliseconds: 150), () {
+          if (!mounted || _searchFocus.hasFocus || _showSettings) return;
+          final primary = FocusManager.instance.primaryFocus;
+          if (primary == null || primary.context == null) {
+            _searchFocus.requestFocus();
+            return;
+          }
+          // Don't steal focus from another text input (dialogs, customer fields, etc.)
+          bool otherTextFieldFocused = false;
+          primary.context?.visitAncestorElements((element) {
+            if (element.widget is EditableText) {
+              otherTextFieldFocused = true;
+              return false;
+            }
+            return true;
+          });
+          if (!otherTextFieldFocused) _searchFocus.requestFocus();
+        });
+      }
+    });
+  }
+
+  // Removes corrupted BillCat-specific CUPS options written by older app versions.
+  // Those lpoptions entries caused Printers & Scanners in System Settings to freeze.
+  Future<void> _cleanupCupsOptions() async {
+    try {
+      final file = File('${Platform.environment['HOME']}/.cups/lpoptions');
+      if (!file.existsSync()) return;
+      final lines = file.readAsLinesSync();
+      final cleaned = lines.map((line) {
+        // Remove BillCat_* media and PageSize options from any line
+        var l = line.replaceAll(RegExp(r'\s*media=BillCat_\S+'), '');
+        l = l.replaceAll(RegExp(r'\s*PageSize=Custom\.\d+x\d+'), '');
+        return l.trim();
+      }).where((l) => l.isNotEmpty).toList();
+      if (cleaned.join('\n') != lines.join('\n')) {
+        file.writeAsStringSync('${cleaned.join('\n')}\n');
+      }
+    } catch (_) {}
   }
 
   Future<void> _loadSettingsFromStorage() async {
@@ -309,17 +388,32 @@ class _BillingScreenState extends State<BillingScreen> {
       _taxRateDisplay = s['tax_rate'] ?? _taxRateDisplay;
       _currencyCode = s['currency_code'] ?? _currencyCode;
       _currencySymbol = s['currency_symbol'] ?? _currencySymbol;
+      _dialCode = s['dial_code'] ?? _dialCode;
       _paperSize = s['paper_size'] ?? _paperSize;
       _selectedPrinter = s['selected_printer'] ?? _selectedPrinter;
+      _barcodeLabelW = double.tryParse(s['barcode_label_w'] ?? '') ?? _barcodeLabelW;
+      _barcodeLabelH = double.tryParse(s['barcode_label_h'] ?? '') ?? _barcodeLabelH;
+      _barcodePerRow = int.tryParse(s['barcode_per_row'] ?? '') ?? _barcodePerRow;
+      _barcodePrinter = s['barcode_printer'] ?? _barcodePrinter;
       _printOrientation = s['print_orientation'] ?? _printOrientation;
       final savedLayout = s['invoice_layout'] ?? _invoiceLayout;
       const _validLayouts = ['Classic','Simple','Modern','GST','Landscape','Theme 1','Theme 2','Theme 3','Theme 4','Theme 5'];
       _invoiceLayout = _validLayouts.contains(savedLayout) ? savedLayout : 'Classic';
       _storeTerms = s['store_terms'] ?? _storeTerms;
       _logoPath = s['logo_path'] ?? _logoPath;
+      // Prefer local setting; fall back to auth user metadata logo_url
+      final metaLogoUrl = Supabase.instance.client.auth.currentUser
+          ?.userMetadata?['logo_url'] as String? ?? '';
+      _logoUrl = (s['logo_url']?.isNotEmpty == true ? s['logo_url']! : metaLogoUrl);
       _autoPrint = (s['auto_print'] ?? '0') == '1';
+      _storeUpiId = s['store_upi_id'] ?? _storeUpiId;
+      _branchNumber = s['branch_number'] ?? _branchNumber;
       _ownerPasscode    = s['owner_passcode'] ?? '';
       _ownerLockEnabled = (s['owner_lock_enabled'] ?? '0') == '1';
+      _waPhoneNumberId = s['wa_phone_number_id'] ?? '';
+      _waAccessToken = s['wa_access_token'] ?? '';
+      _editWaPhoneNumberId = _waPhoneNumberId;
+      _editWaAccessToken = _waAccessToken;
     });
     _syncTaxRate();
     _restoreActivePrinter();
@@ -594,12 +688,15 @@ class _BillingScreenState extends State<BillingScreen> {
 
   @override
   void dispose() {
+    _printSafetyTimer?.cancel();
     ConnectivityService.instance.removeListener(_onSyncComplete);
     _searchController.dispose();
+    _searchFocus.dispose();
     _customerNameCtrl.dispose();
     _customerPhoneCtrl.dispose();
     _customerNameFocus.dispose();
     _customerPhoneFocus.dispose();
+    _addCustomerFocus.dispose();
     _customNameCtrl.dispose();
     _customPriceCtrl.dispose();
     super.dispose();
@@ -648,6 +745,7 @@ class _BillingScreenState extends State<BillingScreen> {
                   ),
                   _buildInventoryView(),
                   _buildReportsView(),
+                  _buildUtilitiesView(),
                 ],
               ),
             ),
@@ -876,24 +974,8 @@ class _BillingScreenState extends State<BillingScreen> {
       child: Row(
         children: [
           // Logo
-          Container(
-            width: 36,
-            height: 36,
-            decoration: BoxDecoration(
-              color: AppColors.primary,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: const Icon(Icons.point_of_sale_rounded,
-                color: Colors.white, size: 20),
-          ),
-          const SizedBox(width: 10),
-          Text('BillCat',
-              style: GoogleFonts.manrope(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w900,
-                  color: AppColors.primary,
-                  letterSpacing: -0.5)),
-          const SizedBox(width: 32),
+          Image.asset('assets/images/billcat_icon.png', height: 100),
+          const SizedBox(width: 20),
           // Nav tabs
           if (!_ownerLockEnabled || _isOwnerMode) ...[
             _navTab('Dashboard', 0),
@@ -905,6 +987,8 @@ class _BillingScreenState extends State<BillingScreen> {
           if (!_ownerLockEnabled || _isOwnerMode) ...[
             const SizedBox(width: 4),
             _reportsDropdownTab(),
+            const SizedBox(width: 4),
+            _utilitiesDropdownTab(),
           ],
           const Spacer(),
           // Lock icon only shown when staff access control is enabled
@@ -916,8 +1000,42 @@ class _BillingScreenState extends State<BillingScreen> {
             ),
             const SizedBox(width: 8),
           ],
-          // Printer + Settings
-          _topBarIconBtn(Icons.print_outlined, 'Printer', _showPrinterDialog),
+          // Print Barcodes (Inventory tab) or Printer (other tabs)
+          if (_selectedTab == 2) ...[
+            GestureDetector(
+              onTap: () {
+                _bulkPrintQtys = { for (final p in _products) p.id: p.stock > 0 ? p.stock : 1 };
+                _bulkPrintSelected = {}; // start empty — user adds via search
+                _bulkPrinters = ['System Default'];
+                Process.run('lpstat', ['-p']).then((r) {
+                  final list = <String>['System Default'];
+                  for (final line in r.stdout.toString().split('\n')) {
+                    if (line.startsWith('printer ')) { final n = line.split(' ')[1]; if (n.isNotEmpty) list.add(n); }
+                  }
+                  if (mounted) setState(() => _bulkPrinters = list);
+                });
+                _showBulkPrintDialog();
+              },
+              child: Container(
+                height: 36,
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                decoration: BoxDecoration(
+                  color: AppColors.primary,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  const Icon(Icons.barcode_reader, color: Colors.white, size: 15),
+                  const SizedBox(width: 7),
+                  Text('Print Barcodes',
+                      style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white)),
+                ]),
+              ),
+            ),
+          ],
+          if (_selectedTab != 2) ...[
+            const SizedBox(width: 8),
+            _topBarIconBtn(Icons.print_outlined, 'Printer', _showPrinterDialog),
+          ],
           const SizedBox(width: 8),
           _topBarIconBtn(Icons.settings_outlined, 'Settings', _openSettings),
           const SizedBox(width: 16),
@@ -930,33 +1048,17 @@ class _BillingScreenState extends State<BillingScreen> {
 
   Widget _navTab(String label, int index) {
     final selected = _selectedTab == index;
-    return GestureDetector(
+    return _NavHoverTab(
+      selected: selected,
       onTap: () => setState(() => _selectedTab = index),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding:
-            const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        decoration: BoxDecoration(
-          color: selected
-              ? AppColors.accentBlue.withValues(alpha: 0.1)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(100),
-        ),
-        child: Text(label,
-            style: GoogleFonts.inter(
-              fontSize: 13,
-              fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-              color: selected
-                  ? AppColors.accentBlue
-                  : AppColors.textMuted.withValues(alpha: 0.7),
-            )),
-      ),
+      label: label,
     );
   }
 
   Widget _reportsDropdownTab() {
     final selected = _selectedTab == 3;
     return PopupMenuButton<String>(
+      tooltip: '',
       offset: const Offset(0, 40),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       color: Colors.white,
@@ -993,32 +1095,52 @@ class _BillingScreenState extends State<BillingScreen> {
           ],
         ),
       )).toList(),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        decoration: BoxDecoration(
-          color: selected ? AppColors.accentBlue.withValues(alpha: 0.1) : Colors.transparent,
-          borderRadius: BorderRadius.circular(100),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              selected ? _reportView : 'Reports',
-              style: GoogleFonts.inter(
-                fontSize: 13,
-                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                color: selected ? AppColors.accentBlue : AppColors.textMuted.withValues(alpha: 0.7),
-              ),
-            ),
-            const SizedBox(width: 4),
-            Icon(
-              Icons.keyboard_arrow_down_rounded,
-              size: 14,
-              color: selected ? AppColors.accentBlue : AppColors.textMuted.withValues(alpha: 0.7),
-            ),
-          ],
-        ),
+      child: _DropdownNavHover(
+        selected: selected,
+        label: selected ? _reportView : 'Reports',
+      ),
+    );
+  }
+
+  Widget _utilitiesDropdownTab() {
+    final selected = _selectedTab == 4;
+    return PopupMenuButton<String>(
+      tooltip: '',
+      offset: const Offset(0, 40),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      color: Colors.white,
+      elevation: 4,
+      onSelected: (value) {
+        setState(() {
+          _selectedTab = 4;
+          _utilitiesView = value;
+        });
+      },
+      itemBuilder: (_) => [
+        'Delivery',
+      ].map((v) => PopupMenuItem<String>(
+        value: v,
+        height: 40,
+        child: Row(children: [
+          Icon(
+            switch (v) {
+              'Delivery' => Icons.local_shipping_outlined,
+              _          => Icons.build_outlined,
+            },
+            size: 16,
+            color: (selected && _utilitiesView == v) ? AppColors.accentBlue : AppColors.textMuted,
+          ),
+          const SizedBox(width: 10),
+          Text(v, style: GoogleFonts.inter(
+            fontSize: 13,
+            fontWeight: (selected && _utilitiesView == v) ? FontWeight.w700 : FontWeight.w500,
+            color: (selected && _utilitiesView == v) ? AppColors.accentBlue : AppColors.textDark,
+          )),
+        ]),
+      )).toList(),
+      child: _DropdownNavHover(
+        selected: selected,
+        label: selected ? _utilitiesView : 'Utilities',
       ),
     );
   }
@@ -1035,7 +1157,9 @@ class _BillingScreenState extends State<BillingScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             // Search bar
-            Container(
+            _HoverShadowBox(
+              borderRadius: 14,
+              child: Container(
               height: 52,
               decoration: BoxDecoration(
                 color: Colors.white,
@@ -1054,7 +1178,45 @@ class _BillingScreenState extends State<BillingScreen> {
                   Expanded(
                     child: TextField(
                       controller: _searchController,
-                      onChanged: (v) => setState(() => _searchQuery = v),
+                      focusNode: _searchFocus,
+                      autofocus: true,
+                      onChanged: (v) {
+                        setState(() => _searchQuery = v);
+                        // Auto-add on exact SKU match (barcode scanner hit)
+                        final query = v.trim();
+                        if (query.isNotEmpty) {
+                          final match = _products.cast<Product?>().firstWhere(
+                            (p) => p!.sku.toLowerCase() == query.toLowerCase(), orElse: () => null);
+                          if (match != null) {
+                            context.read<CartProvider>().addProduct(match);
+                            setState(() { _searchQuery = ''; _searchController.clear(); });
+                            _showToast('${match.name} added to cart');
+                            Future.microtask(() => _searchFocus.requestFocus());
+                          }
+                        }
+                      },
+                      onSubmitted: (v) {
+                        final query = v.trim();
+                        if (query.isEmpty) {
+                          _searchFocus.requestFocus();
+                          return;
+                        }
+                        // Exact SKU match first, then exact name, then partial SKU
+                        Product? match = _products.cast<Product?>().firstWhere(
+                          (p) => p!.sku.toLowerCase() == query.toLowerCase(), orElse: () => null);
+                        match ??= _products.cast<Product?>().firstWhere(
+                          (p) => p!.name.toLowerCase() == query.toLowerCase(), orElse: () => null);
+                        match ??= _products.cast<Product?>().firstWhere(
+                          (p) => p!.sku.toLowerCase().contains(query.toLowerCase()), orElse: () => null);
+                        if (match != null) {
+                          context.read<CartProvider>().addProduct(match);
+                          setState(() { _searchQuery = ''; _searchController.clear(); });
+                          _showToast('${match.name} added to cart');
+                        } else {
+                          _showToast('No product found for "$query"', isError: true);
+                        }
+                        _searchFocus.requestFocus();
+                      },
                       style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w500, color: AppColors.textDark),
                       decoration: InputDecoration(
                         hintText: 'Scan or type item name...',
@@ -1084,6 +1246,7 @@ class _BillingScreenState extends State<BillingScreen> {
                 ],
               ),
             ),
+            ), // _HoverShadowBox
             const SizedBox(height: 20),
             // Category chips
             SingleChildScrollView(
@@ -1093,42 +1256,10 @@ class _BillingScreenState extends State<BillingScreen> {
                   final selected = _selectedCategory == cat;
                   return Padding(
                     padding: const EdgeInsets.only(right: 10),
-                    child: GestureDetector(
-                      onTap: () =>
-                          setState(() => _selectedCategory = cat),
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 150),
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 20, vertical: 9),
-                        decoration: BoxDecoration(
-                          color: selected
-                              ? AppColors.primary
-                              : Colors.white,
-                          borderRadius: BorderRadius.circular(100),
-                          border: Border.all(
-                              color: selected
-                                  ? AppColors.primary
-                                  : AppColors.border),
-                          boxShadow: selected
-                              ? [
-                                  BoxShadow(
-                                      color: AppColors.primary
-                                          .withValues(alpha: 0.25),
-                                      blurRadius: 4,
-                                      offset: const Offset(0, 2))
-                                ]
-                              : null,
-                        ),
-                        child: Text(cat.toUpperCase(),
-                            style: GoogleFonts.inter(
-                              fontSize: 11,
-                              fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                              letterSpacing: 0.8,
-                              color: selected
-                                  ? Colors.white
-                                  : AppColors.textMuted,
-                            )),
-                      ),
+                    child: _CategoryChip(
+                      label: cat,
+                      selected: selected,
+                      onTap: () => setState(() => _selectedCategory = cat),
                     ),
                   );
                 }).toList(),
@@ -1138,21 +1269,32 @@ class _BillingScreenState extends State<BillingScreen> {
             // Product grid
             Expanded(
               child: Consumer<CartProvider>(
-                builder: (context, cart, _) => GridView.builder(
-                  gridDelegate:
-                      const SliverGridDelegateWithMaxCrossAxisExtent(
-                    maxCrossAxisExtent: 220,
-                    mainAxisSpacing: 20,
-                    crossAxisSpacing: 20,
-                    childAspectRatio: 0.72,
-                  ),
-                  itemCount: _filteredProducts.length,
-                  itemBuilder: (_, i) => _ProductCard(
-                    product: _filteredProducts[i],
-                    onTap: () => cart.addProduct(_filteredProducts[i]),
-                    currencySymbol: _currencySymbol,
-                  ),
-                ),
+                builder: (context, cart, _) {
+                  final controller = ScrollController();
+                  return Scrollbar(
+                    controller: controller,
+                    thickness: 4,
+                    radius: const Radius.circular(4),
+                    thumbVisibility: false,
+                    child: GridView.builder(
+                      controller: controller,
+                      padding: const EdgeInsets.only(right: 8),
+                      gridDelegate:
+                          const SliverGridDelegateWithMaxCrossAxisExtent(
+                        maxCrossAxisExtent: 220,
+                        mainAxisSpacing: 20,
+                        crossAxisSpacing: 20,
+                        childAspectRatio: 0.72,
+                      ),
+                      itemCount: _filteredProducts.length,
+                      itemBuilder: (_, i) => _ProductCard(
+                        product: _filteredProducts[i],
+                        onTap: () => cart.addProduct(_filteredProducts[i]),
+                        currencySymbol: _currencySymbol,
+                      ),
+                    ),
+                  );
+                },
               ),
             ),
           ],
@@ -1168,7 +1310,7 @@ class _BillingScreenState extends State<BillingScreen> {
       onHorizontalDragUpdate: (details) {
         setState(() {
           _rightPanelWidth =
-              (_rightPanelWidth - details.delta.dx).clamp(280.0, 680.0);
+              (_rightPanelWidth - details.delta.dx).clamp(375.0, 580.0);
         });
       },
       child: MouseRegion(
@@ -1212,6 +1354,7 @@ class _BillingScreenState extends State<BillingScreen> {
         children: [
           // Customer Name with autocomplete
           Expanded(
+            flex: 1,
             child: _customerAutocomplete(
               controller: _customerNameCtrl,
               focusNode: _customerNameFocus,
@@ -1219,8 +1362,10 @@ class _BillingScreenState extends State<BillingScreen> {
               hint: 'Customer Name',
               filterFn: (c, q) => c.name.toLowerCase().contains(q.toLowerCase()),
               displayFn: (c) => c.name,
-              onChanged: (v) => cart.customerName = v,
+              onChanged: (v) { cart.customerName = v; setState(() {}); },
               textInputAction: TextInputAction.next,
+              onOptionsChanged: (opts) => _nameAcOptions = opts,
+              currentOptions: _nameAcOptions,
               onFieldSubmitted: () => _customerPhoneFocus.requestFocus(),
               onSelected: (c) {
                 _customerNameCtrl.text = c.name;
@@ -1228,14 +1373,15 @@ class _BillingScreenState extends State<BillingScreen> {
                 cart.customerName = c.name;
                 cart.customerPhone = c.phone ?? '';
                 setState(() {});
-                _customerPhoneFocus.requestFocus();
+                if (!_acSkipRefocus) Future.microtask(() => _customerNameFocus.requestFocus());
+                _acSkipRefocus = false;
               },
             ),
           ),
           const SizedBox(width: 10),
           // Phone with autocomplete
-          SizedBox(
-            width: 140,
+          Expanded(
+            flex: 1,
             child: _customerAutocomplete(
               controller: _customerPhoneCtrl,
               focusNode: _customerPhoneFocus,
@@ -1243,27 +1389,120 @@ class _BillingScreenState extends State<BillingScreen> {
               hint: 'Phone Number',
               filterFn: (c, q) => (c.phone ?? '').contains(q),
               displayFn: (c) => c.phone ?? '',
-              onChanged: (v) => cart.customerPhone = v,
+              onChanged: (v) { cart.customerPhone = v; setState(() {}); },
+              onOptionsChanged: (opts) => _phoneAcOptions = opts,
+              currentOptions: _phoneAcOptions,
               onSelected: (c) {
                 _customerNameCtrl.text = c.name;
                 _customerPhoneCtrl.text = c.phone ?? '';
                 cart.customerName = c.name;
                 cart.customerPhone = c.phone ?? '';
                 setState(() {});
+                if (!_acSkipRefocus) Future.microtask(() => _customerPhoneFocus.requestFocus());
+                _acSkipRefocus = false;
               },
               keyboardType: TextInputType.phone,
+              onFieldSubmitted: () {
+                final name  = _customerNameCtrl.text.trim();
+                final phone = _customerPhoneCtrl.text.trim();
+                final hasData = name.isNotEmpty || phone.isNotEmpty;
+                if (hasData) {
+                  final isSaved = _savedCustomers.any((c) =>
+                    (name.isNotEmpty && c.name.toLowerCase() == name.toLowerCase()) ||
+                    (phone.isNotEmpty && (c.phone ?? '') == phone));
+                  if (!isSaved) {
+                    _customerPhoneFocus.unfocus();
+                    _showAddCustomerDialog(cart);
+                    return;
+                  }
+                }
+                _addCustomerFocus.requestFocus();
+              },
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
             ),
           ),
           const SizedBox(width: 10),
-          Container(
-            width: 42,
-            height: 42,
-            decoration: BoxDecoration(
-              color: AppColors.success,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: const Icon(Icons.check_rounded,
-                color: Colors.white, size: 22),
+          ListenableBuilder(
+            listenable: Listenable.merge([_customerNameCtrl, _customerPhoneCtrl]),
+            builder: (context, _) {
+              final name  = _customerNameCtrl.text.trim();
+              final phone = _customerPhoneCtrl.text.trim();
+              final hasData = name.isNotEmpty || phone.isNotEmpty;
+
+              if (hasData) {
+                final isSaved = _savedCustomers.any((c) =>
+                  (name.isNotEmpty && c.name.toLowerCase() == name.toLowerCase()) ||
+                  (phone.isNotEmpty && (c.phone ?? '') == phone));
+
+                if (isSaved) {
+                  // saved customer → subtle clear-customer button
+                  return Tooltip(
+                    message: 'Clear customer',
+                    child: GestureDetector(
+                      onTap: () {
+                        _customerNameCtrl.clear();
+                        _customerPhoneCtrl.clear();
+                        cart.customerName = '';
+                        cart.customerPhone = '';
+                      },
+                      child: Container(
+                        width: 42,
+                        height: 42,
+                        decoration: BoxDecoration(
+                          color: AppColors.surfaceVariant,
+                          border: Border.all(color: AppColors.border),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Icon(Icons.person_remove_outlined, color: AppColors.textMuted, size: 18),
+                      ),
+                    ),
+                  );
+                } else {
+                  // new customer → dark add-person button that saves directly
+                  return GestureDetector(
+                    onTap: () async {
+                      if (name.isEmpty) return;
+                      await LocalDbService.upsertCustomerByPhone(
+                        name: name,
+                        phone: phone.isEmpty ? null : phone,
+                      );
+                      cart.customerName = name;
+                      cart.customerPhone = phone;
+                      await _loadSavedCustomers();
+                      if (ConnectivityService.instance.isOnline) {
+                        ConnectivityService.instance.syncNow();
+                      }
+                      if (mounted) _showToast('Customer saved!');
+                    },
+                    child: Container(
+                      width: 42,
+                      height: 42,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1E293B),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Icon(Icons.person_add_rounded, color: Colors.white, size: 18),
+                    ),
+                  );
+                }
+              }
+
+              return Focus(
+                focusNode: _addCustomerFocus,
+                child: GestureDetector(
+                  onTap: () => _showAddCustomerDialog(cart),
+                  child: Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: AppColors.primary,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.person_add_rounded, color: Colors.white, size: 18),
+                  ),
+                ),
+              );
+            },
           ),
         ],
       ),
@@ -1279,16 +1518,21 @@ class _BillingScreenState extends State<BillingScreen> {
     required String Function(Customer) displayFn,
     required ValueChanged<String> onChanged,
     required ValueChanged<Customer> onSelected,
+    required void Function(List<Customer>) onOptionsChanged,
+    required List<Customer> currentOptions,
     TextInputType? keyboardType,
     VoidCallback? onFieldSubmitted,
     TextInputAction? textInputAction,
+    List<TextInputFormatter>? inputFormatters,
   }) {
     return RawAutocomplete<Customer>(
       textEditingController: controller,
       focusNode: focusNode,
       optionsBuilder: (v) {
-        if (v.text.trim().isEmpty) return const [];
-        return _savedCustomers.where((c) => filterFn(c, v.text)).take(6);
+        if (v.text.trim().isEmpty) { onOptionsChanged([]); return const []; }
+        final opts = _savedCustomers.where((c) => filterFn(c, v.text)).take(6).toList();
+        onOptionsChanged(opts);
+        return opts;
       },
       displayStringForOption: displayFn,
       onSelected: onSelected,
@@ -1313,10 +1557,19 @@ class _BillingScreenState extends State<BillingScreen> {
                   onChanged: onChanged,
                   textInputAction: textInputAction ?? TextInputAction.done,
                   onSubmitted: (_) {
-                    onSubmit();
-                    onFieldSubmitted?.call();
+                    if (currentOptions.isNotEmpty) {
+                      final first = currentOptions.first;
+                      _acSkipRefocus = true;
+                      onOptionsChanged([]);
+                      fn.unfocus();
+                      onSelected(first);
+                    } else {
+                      onSubmit();
+                      onFieldSubmitted?.call();
+                    }
                   },
                   keyboardType: keyboardType,
+                  inputFormatters: inputFormatters,
                   style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w500,
                       color: AppColors.textDark),
                   decoration: InputDecoration(
@@ -1346,20 +1599,23 @@ class _BillingScreenState extends State<BillingScreen> {
               itemCount: options.length,
               itemBuilder: (_, i) {
                 final c = options.elementAt(i);
+                final isFirst = i == 0;
                 return InkWell(
                   onTap: () => onSel(c),
-                  child: Padding(
+                  child: Container(
+                    color: isFirst ? AppColors.primary.withValues(alpha: 0.07) : null,
                     padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                     child: Row(children: [
-                      const Icon(Icons.person_outline_rounded, size: 14,
-                          color: AppColors.textMuted),
+                      Icon(Icons.person_outline_rounded, size: 14,
+                          color: isFirst ? AppColors.primary : AppColors.textMuted),
                       const SizedBox(width: 8),
                       Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                         Text(c.name, style: GoogleFonts.inter(fontSize: 12,
-                            fontWeight: FontWeight.w600, color: AppColors.textDark)),
+                            fontWeight: isFirst ? FontWeight.w700 : FontWeight.w600,
+                            color: isFirst ? AppColors.primary : AppColors.textDark)),
                         if (c.phone != null && c.phone!.isNotEmpty)
                           Text(c.phone!, style: GoogleFonts.inter(fontSize: 11,
-                              color: AppColors.textMuted)),
+                              color: isFirst ? AppColors.primary.withValues(alpha: 0.7) : AppColors.textMuted)),
                       ])),
                     ]),
                   ),
@@ -1473,9 +1729,12 @@ class _BillingScreenState extends State<BillingScreen> {
                         ],
                       ),
                     ))
-                : ListView.builder(
+                : ListView.separated(
                     padding: const EdgeInsets.symmetric(vertical: 4),
                     itemCount: cart.items.length + 1,
+                    separatorBuilder: (_, i) => i < cart.items.length - 1
+                        ? const Divider(height: 1, thickness: 0.5, color: AppColors.border, indent: 8, endIndent: 8)
+                        : const SizedBox.shrink(),
                     itemBuilder: (_, i) {
                       if (i == cart.items.length) {
                         return _addingCustomProduct
@@ -1712,17 +1971,16 @@ class _BillingScreenState extends State<BillingScreen> {
                   color: AppColors.textMuted,
                   letterSpacing: 1.5)),
           const SizedBox(height: 10),
-          Wrap(
+          Row(
             spacing: 8,
-            runSpacing: 8,
             children: methods.map((m) {
               final selected = cart.paymentMethod == m.$1;
-              return GestureDetector(
+              return Expanded(child: GestureDetector(
                 onTap: () => cart.setPaymentMethod(m.$1),
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 150),
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 7),
+                      horizontal: 6, vertical: 7),
                   decoration: BoxDecoration(
                     color: selected
                         ? AppColors.accentBlue.withValues(alpha: 0.05)
@@ -1735,7 +1993,7 @@ class _BillingScreenState extends State<BillingScreen> {
                         width: selected ? 2 : 1),
                   ),
                   child: Row(
-                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Container(
                         width: 10,
@@ -1752,21 +2010,22 @@ class _BillingScreenState extends State<BillingScreen> {
                           shape: BoxShape.circle,
                         ),
                       ),
-                      const SizedBox(width: 6),
-                      Text(m.$2.toUpperCase(),
+                      const SizedBox(width: 5),
+                      Flexible(child: Text(m.$2.toUpperCase(),
+                          overflow: TextOverflow.ellipsis,
                           style: GoogleFonts.inter(
                               fontSize: 10,
                               fontWeight: selected
                                   ? FontWeight.w700
                                   : FontWeight.w500,
-                              letterSpacing: 0.8,
+                              letterSpacing: 0.5,
                               color: selected
                                   ? AppColors.accentBlue
-                                  : AppColors.textMuted)),
+                                  : AppColors.textMuted))),
                     ],
                   ),
                 ),
-              );
+              ));
             }).toList(),
           ),
         ],
@@ -2052,123 +2311,336 @@ class _BillingScreenState extends State<BillingScreen> {
     );
   }
 
+  Future<String> _uploadLogoToCloud(String localPath) async {
+    try {
+      final client = Supabase.instance.client;
+      final userId = client.auth.currentUser?.id;
+      if (userId == null) return '';
+      final bytes = await File(localPath).readAsBytes();
+      final ext = localPath.split('.').last.toLowerCase();
+      await client.storage.from('logos').uploadBinary(
+        '$userId.$ext', bytes,
+        fileOptions: const FileOptions(upsert: true),
+      );
+      final url = client.storage.from('logos').getPublicUrl('$userId.$ext');
+      // Persist URL in auth user metadata so it syncs across devices
+      await client.auth.updateUser(UserAttributes(data: {'logo_url': url}));
+      return url;
+    } catch (e) {
+      debugPrint('Logo upload failed: $e');
+      return '';
+    }
+  }
+
   void _showProfileDialog(String email) {
+    _editStoreName    = _storeName;
+    _editStoreAddress = _storeAddress;
+    _editStorePhone   = _storePhone;
+    _editStoreEmail   = _storeEmail;
+    _editStoreGstin   = _storeGstin;
+    _editStoreUpiId   = _storeUpiId;
+    _editBranchNumber = _branchNumber;
+    _editLogoPath     = _logoPath;
+    _editLogoUrl      = _logoUrl;
+
+    String dialogLogoPath = _logoPath;
+    String dialogLogoUrl  = _logoUrl;
+    bool isSaving = false;
+
+    final initials = _storeName.trim().split(RegExp(r'\s+')).take(2)
+        .map((w) => w.isNotEmpty ? w[0].toUpperCase() : '').join();
+
     showDialog(
       context: context,
-      builder: (ctx) => Dialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        child: Container(
-          width: 400,
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Avatar
-              Container(
-                width: 72,
-                height: 72,
-                decoration: const BoxDecoration(
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlg) => Dialog(
+          backgroundColor: const Color(0xFFF2F2F7),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          clipBehavior: Clip.antiAlias,
+          child: SizedBox(
+            width: 460,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // ── Header ──
+                Container(
+                  padding: const EdgeInsets.fromLTRB(20, 20, 20, 18),
                   color: AppColors.primary,
-                  shape: BoxShape.circle,
-                ),
-                child: Center(
-                  child: Text(email[0].toUpperCase(),
-                      style: GoogleFonts.manrope(
-                          fontSize: 28,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.white)),
-                ),
-              ),
-              const SizedBox(height: 16),
-              Text('My Account',
-                  style: GoogleFonts.manrope(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w700,
-                      color: AppColors.textDark)),
-              const SizedBox(height: 4),
-              Text(email,
-                  style: GoogleFonts.inter(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w300,
-                      color: AppColors.textMuted)),
-              const SizedBox(height: 24),
-              const Divider(height: 1, color: AppColors.border),
-              const SizedBox(height: 20),
-              // Info rows
-              _profileInfoRow(Icons.store_outlined, 'General', _storeName),
-              const SizedBox(height: 12),
-              _profileInfoRow(Icons.email_outlined, 'Email', email),
-              const SizedBox(height: 12),
-              _profileInfoRow(Icons.print_outlined, 'Printer', _selectedPrinter),
-              const SizedBox(height: 28),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () {
-                        Navigator.pop(ctx);
-                        _confirmLogout(context);
-                      },
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        side: const BorderSide(color: AppColors.error),
-                        foregroundColor: AppColors.error,
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10)),
+                  child: Row(
+                    children: [
+                      // Tappable logo
+                      GestureDetector(
+                        onTap: () async {
+                          final r = await FilePicker.platform.pickFiles(type: FileType.image);
+                          if (r?.files.single.path != null) {
+                            final copied = await LocalDbService.copyImageToAppDir(r!.files.single.path!);
+                            setDlg(() {
+                              dialogLogoPath = copied;
+                              _editLogoPath  = copied;
+                            });
+                          }
+                        },
+                        child: Stack(
+                          children: [
+                            Container(
+                              width: 56,
+                              height: 56,
+                              decoration: BoxDecoration(
+                                color: Colors.white.withValues(alpha: 0.12),
+                                border: Border.all(color: Colors.white.withValues(alpha: 0.25), width: 1.5),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: dialogLogoPath.isNotEmpty
+                                  ? ClipRRect(
+                                      borderRadius: BorderRadius.circular(11),
+                                      child: Image.file(File(dialogLogoPath),
+                                          width: 56, height: 56, fit: BoxFit.cover,
+                                          errorBuilder: (_, __, ___) => _logoFallback(initials)),
+                                    )
+                                  : dialogLogoUrl.isNotEmpty
+                                      ? ClipRRect(
+                                          borderRadius: BorderRadius.circular(11),
+                                          child: Image.network(dialogLogoUrl,
+                                              width: 56, height: 56, fit: BoxFit.cover,
+                                              errorBuilder: (_, __, ___) => _logoFallback(initials)),
+                                        )
+                                      : _logoFallback(initials),
+                            ),
+                            // Camera overlay
+                            Positioned(
+                              right: 0, bottom: 0,
+                              child: Container(
+                                width: 20, height: 20,
+                                decoration: BoxDecoration(
+                                  color: AppColors.accent,
+                                  shape: BoxShape.circle,
+                                  border: Border.all(color: AppColors.primary, width: 1.5),
+                                ),
+                                child: const Icon(Icons.camera_alt_rounded,
+                                    size: 11, color: Colors.white),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                      child: Text('Logout',
-                          style: GoogleFonts.inter(
-                              fontWeight: FontWeight.w600, fontSize: 14)),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(_editStoreName.isNotEmpty ? _editStoreName : _storeName,
+                                style: GoogleFonts.manrope(
+                                    fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white)),
+                            const SizedBox(height: 2),
+                            Text(email,
+                                style: GoogleFonts.inter(
+                                    fontSize: 11.5, color: Colors.white.withValues(alpha: 0.6))),
+                            const SizedBox(height: 4),
+                            GestureDetector(
+                              onTap: () async {
+                                final r = await FilePicker.platform.pickFiles(type: FileType.image);
+                                if (r?.files.single.path != null) {
+                                  final copied = await LocalDbService.copyImageToAppDir(r!.files.single.path!);
+                                  setDlg(() {
+                                    dialogLogoPath = copied;
+                                    _editLogoPath  = copied;
+                                  });
+                                }
+                              },
+                              child: Text(
+                                dialogLogoPath.isNotEmpty || dialogLogoUrl.isNotEmpty
+                                    ? 'Change logo' : 'Upload logo',
+                                style: GoogleFonts.inter(
+                                    fontSize: 11, fontWeight: FontWeight.w500,
+                                    color: AppColors.accent,
+                                    decoration: TextDecoration.underline,
+                                    decorationColor: AppColors.accent),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (dialogLogoPath.isNotEmpty)
+                        GestureDetector(
+                          onTap: () => setDlg(() {
+                            dialogLogoPath = '';
+                            dialogLogoUrl  = '';
+                            _editLogoPath  = '';
+                            _editLogoUrl   = '';
+                          }),
+                          child: Icon(Icons.close_rounded,
+                              size: 16, color: Colors.white.withValues(alpha: 0.5)),
+                        ),
+                    ],
+                  ),
+                ),
+
+                // ── Scrollable fields ──
+                Flexible(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(16, 20, 16, 4),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _settingsSectionHeader('BUSINESS DETAILS'),
+                        _settingsCard([
+                          _settingsTextField('Business Name', _editStoreName,
+                              (v) => _editStoreName = v),
+                          _settingsDivider(),
+                          _settingsTextField('Address', _editStoreAddress,
+                              (v) => _editStoreAddress = v, maxLines: 2),
+                        ]),
+                        const SizedBox(height: 20),
+                        _settingsSectionHeader('CONTACT INFO'),
+                        _settingsCard([
+                          _settingsTextField('Phone Number', _editStorePhone,
+                              (v) => _editStorePhone = v,
+                              keyboardType: TextInputType.phone),
+                          _settingsDivider(),
+                          _settingsTextField('Business Email', _editStoreEmail,
+                              (v) => _editStoreEmail = v,
+                              keyboardType: TextInputType.emailAddress),
+                        ]),
+                        const SizedBox(height: 20),
+                        _settingsSectionHeader('TAX & PAYMENTS'),
+                        _settingsCard([
+                          _settingsTextField('GSTIN', _editStoreGstin,
+                              (v) => _editStoreGstin = v),
+                          _settingsDivider(),
+                          _settingsTextField('UPI ID', _editStoreUpiId,
+                              (v) => _editStoreUpiId = v),
+                          _settingsDivider(),
+                          _settingsTextField('Branch Number', _editBranchNumber,
+                              (v) => setState(() => _editBranchNumber = v),
+                              hint: 'e.g. 01'),
+                        ]),
+                        const SizedBox(height: 20),
+                        _settingsSectionHeader('BILLCAT ACCOUNT'),
+                        _settingsCard([
+                          Builder(builder: (_) {
+                            final rawUid = Supabase.instance.client.auth.currentUser?.id ?? '';
+                            final shortId = rawUid.isEmpty ? '—' : rawUid.replaceAll('-', '').substring(0, rawUid.length >= 6 ? 6 : rawUid.length).toUpperCase();
+                            return Container(
+                              constraints: const BoxConstraints(minHeight: 46),
+                              padding: const EdgeInsets.symmetric(horizontal: 16),
+                              child: Row(
+                                children: [
+                                  Text('BillCat ID',
+                                      style: GoogleFonts.inter(
+                                          fontSize: 13.5,
+                                          fontWeight: FontWeight.w500,
+                                          color: const Color(0xFF1C1C1E))),
+                                  const Spacer(),
+                                  GestureDetector(
+                                    onTap: () {
+                                      Clipboard.setData(ClipboardData(text: shortId));
+                                      _showToast('BillCat ID copied!');
+                                    },
+                                    child: Row(
+                                      children: [
+                                        Text(shortId,
+                                            style: GoogleFonts.inter(
+                                                fontSize: 13,
+                                                color: const Color(0xFF8E8E93),
+                                                fontFeatures: [const FontFeature.tabularFigures()])),
+                                        const SizedBox(width: 6),
+                                        const Icon(Icons.copy_rounded, size: 14, color: Color(0xFF8E8E93)),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          }),
+                        ]),
+                        const SizedBox(height: 16),
+                      ],
                     ),
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: ElevatedButton(
-                      onPressed: () => Navigator.pop(ctx),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.primary,
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10)),
-                      ),
-                      child: Text('Close',
-                          style: GoogleFonts.inter(
-                              fontWeight: FontWeight.w600, fontSize: 14)),
-                    ),
+                ),
+
+                // ── Footer ──
+                Container(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                  decoration: const BoxDecoration(
+                    color: Color(0xFFF2F2F7),
+                    border: Border(top: BorderSide(color: Color(0xFFD8D8DC), width: 0.5)),
                   ),
-                ],
-              ),
-            ],
+                  child: Row(
+                    children: [
+                      TextButton.icon(
+                        onPressed: isSaving ? null : () {
+                          Navigator.pop(ctx);
+                          _confirmLogout(context);
+                        },
+                        icon: const Icon(Icons.logout_rounded, size: 14, color: AppColors.error),
+                        label: Text('Logout',
+                            style: GoogleFonts.inter(
+                                fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.error)),
+                        style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8)),
+                      ),
+                      const Spacer(),
+                      TextButton(
+                        onPressed: isSaving ? null : () => Navigator.pop(ctx),
+                        style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                            foregroundColor: AppColors.textMuted),
+                        child: Text('Cancel',
+                            style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w500)),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton(
+                        onPressed: isSaving ? null : () async {
+                          setDlg(() => isSaving = true);
+                          // Upload logo to cloud if a new local file was picked
+                          if (_editLogoPath.isNotEmpty) {
+                            final url = await _uploadLogoToCloud(_editLogoPath);
+                            if (url.isNotEmpty) _editLogoUrl = url;
+                          }
+                          if (ctx.mounted) Navigator.pop(ctx);
+                          setState(() {
+                            _storeName    = _editStoreName.trim().isEmpty ? 'BillCat Store' : _editStoreName.trim();
+                            _storeAddress = _editStoreAddress.trim();
+                            _storePhone   = _editStorePhone.trim();
+                            _storeEmail   = _editStoreEmail.trim();
+                            _storeGstin   = _editStoreGstin.trim();
+                            _storeUpiId   = _editStoreUpiId.trim();
+                            _branchNumber = _editBranchNumber.trim().isEmpty ? '01' : _editBranchNumber.trim();
+                            _logoPath     = _editLogoPath;
+                            _logoUrl      = _editLogoUrl;
+                          });
+                          _persistSettings();
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.accent,
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                        child: isSaving
+                            ? const SizedBox(width: 16, height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                            : Text('Save Changes',
+                                style: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 13)),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
     );
   }
 
-  Widget _profileInfoRow(IconData icon, String label, String value) {
-    return Row(
-      children: [
-        Icon(icon, size: 16, color: AppColors.textMuted),
-        const SizedBox(width: 10),
-        Text('$label:',
-            style: GoogleFonts.inter(
-                fontSize: 12,
-                fontWeight: FontWeight.w500,
-                color: AppColors.textMuted)),
-        const SizedBox(width: 6),
-        Expanded(
-          child: Text(value,
-              overflow: TextOverflow.ellipsis,
-              style: GoogleFonts.inter(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: AppColors.textDark)),
-        ),
-      ],
-    );
-  }
+  Widget _logoFallback(String initials) => Center(
+        child: Text(initials.isNotEmpty ? initials : 'B',
+            style: GoogleFonts.manrope(
+                fontSize: 18, fontWeight: FontWeight.w800, color: Colors.white)),
+      );
 
   // ── Settings panel (Apple-style) ─────────────────────────────────────────────
 
@@ -2184,6 +2656,7 @@ class _BillingScreenState extends State<BillingScreen> {
       _editTaxRate = _taxRateDisplay;
       _editCurrencyCode = _currencyCode;
       _editCurrencySymbol = _currencySymbol;
+      _editDialCode = _dialCode;
       _editPaperSize = _paperSize;
       _editAutoPrint = _autoPrint;
       _editInvoiceLayout = _invoiceLayout;
@@ -2191,6 +2664,9 @@ class _BillingScreenState extends State<BillingScreen> {
       _editPrinterTab = 'Regular';
       _editStoreTerms = _storeTerms;
       _editLogoPath = _logoPath;
+      _editLogoUrl  = _logoUrl;
+      _editStoreUpiId = _storeUpiId;
+      _editBranchNumber = _branchNumber;
       _settingsPage = 'General';
       _showSettings = true;
     });
@@ -2209,12 +2685,18 @@ class _BillingScreenState extends State<BillingScreen> {
       _syncTaxRate();
       _currencyCode = _editCurrencyCode;
       _currencySymbol = _editCurrencySymbol;
+      _dialCode = _editDialCode;
       _paperSize = _editPaperSize;
       _autoPrint = _editAutoPrint;
       _invoiceLayout = _editInvoiceLayout;
       _printOrientation = _editPrintOrientation;
       _storeTerms = _editStoreTerms;
       _logoPath = _editLogoPath;
+      _logoUrl  = _editLogoUrl;
+      _storeUpiId = _editStoreUpiId.trim();
+      _branchNumber = _editBranchNumber.trim().isEmpty ? '01' : _editBranchNumber.trim();
+      _waPhoneNumberId = _editWaPhoneNumberId.trim();
+      _waAccessToken = _editWaAccessToken.trim();
       _showSettings = false;
     });
     _persistSettings();
@@ -2232,13 +2714,19 @@ class _BillingScreenState extends State<BillingScreen> {
       'tax_rate': _taxRateDisplay,
       'currency_code': _currencyCode,
       'currency_symbol': _currencySymbol,
+      'dial_code': _dialCode,
       'paper_size': _paperSize,
       'selected_printer': _selectedPrinter,
       'print_orientation': _printOrientation,
       'invoice_layout': _invoiceLayout,
       'store_terms': _storeTerms,
       'logo_path': _logoPath,
+      'logo_url':  _logoUrl,
       'auto_print': _autoPrint ? '1' : '0',
+      'store_upi_id': _storeUpiId,
+      'branch_number': _branchNumber,
+      'wa_phone_number_id': _waPhoneNumberId,
+      'wa_access_token': _waAccessToken,
     });
     ConnectivityService.instance.syncNow();
   }
@@ -2249,6 +2737,7 @@ class _BillingScreenState extends State<BillingScreen> {
     (icon: Icons.print_outlined,            label: 'Printer'),
     (icon: Icons.person_outline_rounded,    label: 'Account'),
     (icon: Icons.shield_outlined,           label: 'Security'),
+    (icon: Icons.chat_bubble_outline_rounded, label: 'WhatsApp'),
   ];
 
   Widget _buildSettingsPanel() {
@@ -2372,11 +2861,12 @@ class _BillingScreenState extends State<BillingScreen> {
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 500),
           child: switch (_settingsPage) {
-            'General' => _buildSettingsStore(),
-            'Tax'     => _buildSettingsTax(),
-            'Account' => _buildSettingsAccount(),
-            'Security'=> _buildSettingsSecurity(),
-            _         => const SizedBox.shrink(),
+            'General'   => _buildSettingsStore(),
+            'Tax'       => _buildSettingsTax(),
+            'Account'   => _buildSettingsAccount(),
+            'Security'  => _buildSettingsSecurity(),
+            'WhatsApp'  => _buildSettingsWhatsApp(),
+            _           => const SizedBox.shrink(),
           },
         ),
       ),
@@ -2450,7 +2940,69 @@ class _BillingScreenState extends State<BillingScreen> {
             ),
           ),
         ]),
+        const SizedBox(height: 24),
+        _settingsSectionHeader('REGION'),
+        const SizedBox(height: 8),
+        _settingsCard([
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: () async {
+                final picked = await _showDialCodePicker(context, _editDialCode);
+                if (picked != null) setState(() => _editDialCode = picked);
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                child: Row(children: [
+                  const Icon(Icons.language_rounded, size: 20, color: AppColors.textMuted),
+                  const SizedBox(width: 12),
+                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('Country Dial Code', style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w500, color: const Color(0xFF1D1D1F))),
+                    Text('Used for WhatsApp: $_editDialCode', style: GoogleFonts.inter(fontSize: 12, color: const Color(0xFF6E6E73))),
+                  ])),
+                  Text(_editDialCode, style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.primary)),
+                  const SizedBox(width: 4),
+                  const Icon(Icons.chevron_right_rounded, color: Color(0xFFC7C7CC), size: 20),
+                ]),
+              ),
+            ),
+          ),
+        ]),
       ],
+    );
+  }
+
+  static const _dialCodes = [
+    ('+91', '🇮🇳', 'India'), ('+1', '🇺🇸', 'United States'), ('+44', '🇬🇧', 'United Kingdom'),
+    ('+971', '🇦🇪', 'UAE'), ('+966', '🇸🇦', 'Saudi Arabia'), ('+65', '🇸🇬', 'Singapore'),
+    ('+60', '🇲🇾', 'Malaysia'), ('+92', '🇵🇰', 'Pakistan'), ('+880', '🇧🇩', 'Bangladesh'),
+    ('+94', '🇱🇰', 'Sri Lanka'), ('+977', '🇳🇵', 'Nepal'), ('+61', '🇦🇺', 'Australia'),
+    ('+49', '🇩🇪', 'Germany'), ('+33', '🇫🇷', 'France'), ('+81', '🇯🇵', 'Japan'),
+    ('+86', '🇨🇳', 'China'), ('+55', '🇧🇷', 'Brazil'), ('+27', '🇿🇦', 'South Africa'),
+    ('+234', '🇳🇬', 'Nigeria'), ('+254', '🇰🇪', 'Kenya'),
+  ];
+
+  Future<String?> _showDialCodePicker(BuildContext context, String current) async {
+    return showModalBottomSheet<String>(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => ListView(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: Text('Select Country', style: GoogleFonts.manrope(fontSize: 16, fontWeight: FontWeight.w700)),
+          ),
+          for (final (code, flag, name) in _dialCodes)
+            ListTile(
+              leading: Text(flag, style: const TextStyle(fontSize: 22)),
+              title: Text(name, style: GoogleFonts.inter(fontSize: 14)),
+              trailing: Text(code, style: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted)),
+              selected: code == current,
+              selectedTileColor: AppColors.primary.withValues(alpha: 0.06),
+              onTap: () => Navigator.pop(ctx, code),
+            ),
+        ],
+      ),
     );
   }
 
@@ -2631,6 +3183,8 @@ class _BillingScreenState extends State<BillingScreen> {
                   _settingsDivider(),
                   _settingsTextField('GSTIN', _editStoreGstin, (v) => setState(() => _editStoreGstin = v)),
                   _settingsDivider(),
+                  _settingsTextField('UPI ID', _editStoreUpiId, (v) => setState(() => _editStoreUpiId = v)),
+                  _settingsDivider(),
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                     child: Row(children: [
@@ -2768,6 +3322,7 @@ class _BillingScreenState extends State<BillingScreen> {
                       layout: _editInvoiceLayout,
                       storeTerms: _editStoreTerms,
                       logoPath: _editLogoPath,
+                      storeUpiId: _editStoreUpiId,
                     ),
                     allowPrinting: false,
                     allowSharing: false,
@@ -3779,6 +4334,70 @@ class _BillingScreenState extends State<BillingScreen> {
     );
   }
 
+
+  // ── WhatsApp Settings ──
+  Widget _buildSettingsWhatsApp() {
+    final configured = _waPhoneNumberId.isNotEmpty && _waAccessToken.isNotEmpty;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _settingsPageTitle('WhatsApp', Icons.chat_bubble_outline_rounded),
+        const SizedBox(height: 8),
+        Padding(
+          padding: const EdgeInsets.only(left: 2, bottom: 16),
+          child: Text(
+            'Send invoices automatically via WhatsApp using Meta Cloud API. Free 1,000 conversations/month.',
+            style: GoogleFonts.inter(fontSize: 12.5, color: const Color(0xFF6E6E73)),
+          ),
+        ),
+        if (configured) ...[
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF0FFF4),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: const Color(0xFF34C759).withValues(alpha: 0.4)),
+            ),
+            child: Row(children: [
+              const Icon(Icons.check_circle_rounded, size: 16, color: Color(0xFF1AAD56)),
+              const SizedBox(width: 8),
+              Text('WhatsApp API configured', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: const Color(0xFF1AAD56))),
+            ]),
+          ),
+          const SizedBox(height: 16),
+        ],
+        _settingsSectionHeader('META CLOUD API'),
+        const SizedBox(height: 12),
+        _settingsCard([
+          _settingsTextField('Phone Number ID', _editWaPhoneNumberId,
+              (v) => setState(() => _editWaPhoneNumberId = v),
+              hint: '1149269661601168'),
+          _settingsDivider(),
+          _settingsTextField('Access Token', _editWaAccessToken,
+              (v) => setState(() => _editWaAccessToken = v),
+              hint: 'EAAxxxxxxxx...', obscureText: true),
+        ]),
+        const SizedBox(height: 16),
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF0F4FF),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: AppColors.primary.withValues(alpha: 0.2)),
+          ),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Icon(Icons.info_outline_rounded, size: 16, color: AppColors.primary),
+            const SizedBox(width: 10),
+            Expanded(child: Text(
+              'Get Phone Number ID and Access Token from Meta for Developers → BillCat app → WhatsApp → API Setup.',
+              style: GoogleFonts.inter(fontSize: 12, color: AppColors.primary),
+            )),
+          ]),
+        ),
+      ],
+    );
+  }
+
   // ── Settings UI helpers ──
 
   Widget _settingsPageTitle(String title, IconData icon) {
@@ -3838,6 +4457,8 @@ class _BillingScreenState extends State<BillingScreen> {
     ValueChanged<String> onChanged, {
     TextInputType? keyboardType,
     int maxLines = 1,
+    bool obscureText = false,
+    String? hint,
   }) {
     return Container(
       constraints: BoxConstraints(minHeight: maxLines > 1 ? 0 : 46),
@@ -3858,12 +4479,13 @@ class _BillingScreenState extends State<BillingScreen> {
               initialValue: value,
               onChanged: onChanged,
               keyboardType: keyboardType,
-              maxLines: maxLines,
+              maxLines: obscureText ? 1 : maxLines,
+              obscureText: obscureText,
               style: GoogleFonts.inter(
                   fontSize: 13.5, color: const Color(0xFF1D1D1F)),
               decoration: InputDecoration(
                 border: InputBorder.none,
-                hintText: label,
+                hintText: hint ?? label,
                 hintStyle: GoogleFonts.inter(
                     fontSize: 13.5, color: const Color(0xFFC7C7CC)),
                 isDense: true,
@@ -4227,12 +4849,9 @@ class _BillingScreenState extends State<BillingScreen> {
   // ── Printer dialog ───────────────────────────────────────────────────────────
 
   void _showPrinterDialog() async {
-    // Load real printers from OS before opening dialog
-    List<Printer> systemPrinters = [];
-    try {
-      systemPrinters = await Printing.listPrinters();
-    } catch (_) {}
     if (!mounted) return;
+    // Open dialog immediately — load printers in the background
+    List<Printer> systemPrinters = [];
 
     const paperSizes = ['A4', 'A5', '2 inch', '3 inch', '4 inch', 'Custom'];
     Printer? selPrinter = _activePrinter;
@@ -4273,10 +4892,25 @@ class _BillingScreenState extends State<BillingScreen> {
       );
     }
 
+    bool _loadingPrinters = true;
+
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setLocal) => Dialog(
+        builder: (ctx, setLocal) {
+          if (_loadingPrinters) {
+            _loadingPrinters = false;
+            Future(() async {
+              try {
+                final printers = await Printing.listPrinters()
+                    .timeout(const Duration(seconds: 5));
+                if (ctx.mounted) setLocal(() => systemPrinters = printers);
+              } catch (_) {
+                if (ctx.mounted) setLocal(() {});
+              }
+            });
+          }
+          return Dialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           child: Container(
             width: 440,
@@ -4452,7 +5086,8 @@ class _BillingScreenState extends State<BillingScreen> {
               ],
             ),
           ),
-        ),
+        );
+        },
       ),
     );
   }
@@ -4546,7 +5181,7 @@ class _BillingScreenState extends State<BillingScreen> {
 
   // ── Print helpers ────────────────────────────────────────────────────────────
 
-  TransactionRecord _snapshotCart(CartProvider cart) => TransactionRecord(
+  TransactionRecord _snapshotCart(CartProvider cart, {String? invoiceNumber}) => TransactionRecord(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         customerName: cart.customerName.isEmpty ? null : cart.customerName,
         customerPhone: cart.customerPhone.isEmpty ? null : cart.customerPhone,
@@ -4556,6 +5191,7 @@ class _BillingScreenState extends State<BillingScreen> {
                   productName: i.product.name,
                   price: i.product.price,
                   quantity: i.quantity,
+                  description: i.product.description,
                 ))
             .toList(),
         subtotal: cart.subtotal,
@@ -4564,15 +5200,17 @@ class _BillingScreenState extends State<BillingScreen> {
         total: cart.total,
         paymentMethod: cart.paymentMethod.name,
         createdAt: DateTime.now(),
+        invoiceNumber: invoiceNumber,
       );
 
-  void _printCurrentBill(CartProvider cart) =>
-      _printRecord(_snapshotCart(cart));
+  void _printCurrentBill(CartProvider cart, {String docType = 'Invoice', bool toPrinter = false}) =>
+      _printRecord(_snapshotCart(cart), docType: docType, toPrinter: toPrinter);
 
   void _showPrintBillDialog(CartProvider cart) {
-    final hasPrinter = _activePrinter != null;
-    final hasPhone = cart.customerPhone.trim().isNotEmpty;
-    bool sendWhatsApp = hasPhone;
+    bool sendToPrinter = false;
+    bool sendWhatsApp = false;
+    String docType = 'Invoice';
+    final phoneCtrl = TextEditingController(text: cart.customerPhone);
 
     showDialog(
       context: context,
@@ -4590,7 +5228,7 @@ class _BillingScreenState extends State<BillingScreen> {
                   Container(
                     width: 36, height: 36,
                     decoration: BoxDecoration(color: AppColors.surfaceVariant, borderRadius: BorderRadius.circular(8)),
-                    child: const Icon(Icons.print_rounded, size: 18, color: AppColors.primary),
+                    child: const Icon(Icons.picture_as_pdf_rounded, size: 18, color: AppColors.primary),
                   ),
                   const SizedBox(width: 12),
                   Text('Print Bill', style: GoogleFonts.manrope(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.textDark)),
@@ -4604,96 +5242,117 @@ class _BillingScreenState extends State<BillingScreen> {
                 const SizedBox(height: 20),
                 const Divider(height: 1, color: AppColors.border),
                 const SizedBox(height: 16),
-                // Printer info
-                if (hasPrinter)
-                  Container(
-                    padding: const EdgeInsets.all(14),
-                    decoration: BoxDecoration(
-                      color: AppColors.surfaceVariant,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: AppColors.border),
-                    ),
-                    child: Row(children: [
-                      const Icon(Icons.print_rounded, size: 16, color: AppColors.primary),
-                      const SizedBox(width: 10),
-                      Expanded(child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(_activePrinter!.name, style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textDark)),
-                          Text('Paper: $_paperSize  •  Layout: $_invoiceLayout',
-                              style: GoogleFonts.inter(fontSize: 11, color: AppColors.textMuted)),
-                        ],
-                      )),
-                    ]),
-                  )
-                else
-                  InkWell(
-                    onTap: () { Navigator.pop(ctx); _showPrinterDialog(); },
-                    borderRadius: BorderRadius.circular(10),
+                // Document type selector
+                Row(children: [
+                  Expanded(child: GestureDetector(
+                    onTap: () => setLocal(() => docType = 'Invoice'),
                     child: Container(
-                      padding: const EdgeInsets.all(14),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
                       decoration: BoxDecoration(
-                        color: const Color(0xFFFFF3F3),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: const Color(0xFFFFCDD2)),
+                        color: docType == 'Invoice' ? AppColors.primary : AppColors.surfaceVariant,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: docType == 'Invoice' ? AppColors.primary : AppColors.border),
                       ),
-                      child: Row(children: [
-                        const Icon(Icons.print_disabled_rounded, size: 16, color: Color(0xFFE53935)),
-                        const SizedBox(width: 10),
-                        Expanded(child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text('No printer connected',
-                                style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: const Color(0xFFE53935))),
-                            Text('Tap to set up a printer in Settings',
-                                style: GoogleFonts.inter(fontSize: 11, color: AppColors.textMuted)),
-                          ],
-                        )),
-                        const Icon(Icons.arrow_forward_ios_rounded, size: 12, color: AppColors.textMuted),
+                      child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                        Icon(Icons.receipt_long_rounded, size: 14,
+                            color: docType == 'Invoice' ? Colors.white : AppColors.textMuted),
+                        const SizedBox(width: 6),
+                        Text('Invoice', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600,
+                            color: docType == 'Invoice' ? Colors.white : AppColors.textMuted)),
                       ]),
                     ),
-                  ),
+                  )),
+                  const SizedBox(width: 8),
+                  Expanded(child: GestureDetector(
+                    onTap: () => setLocal(() => docType = 'Quotation'),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      decoration: BoxDecoration(
+                        color: docType == 'Quotation' ? AppColors.primary : AppColors.surfaceVariant,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: docType == 'Quotation' ? AppColors.primary : AppColors.border),
+                      ),
+                      child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                        Icon(Icons.description_outlined, size: 14,
+                            color: docType == 'Quotation' ? Colors.white : AppColors.textMuted),
+                        const SizedBox(width: 6),
+                        Text('Quotation', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600,
+                            color: docType == 'Quotation' ? Colors.white : AppColors.textMuted)),
+                      ]),
+                    ),
+                  )),
+                ]),
                 const SizedBox(height: 12),
-                // WhatsApp toggle
+                // Printer toggle
                 InkWell(
-                  onTap: hasPhone ? () => setLocal(() => sendWhatsApp = !sendWhatsApp) : null,
+                  onTap: () => setLocal(() => sendToPrinter = !sendToPrinter),
                   borderRadius: BorderRadius.circular(10),
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                     decoration: BoxDecoration(
-                      color: sendWhatsApp && hasPhone
-                          ? const Color(0xFF25D366).withValues(alpha: 0.08)
+                      color: sendToPrinter
+                          ? AppColors.primary.withValues(alpha: 0.08)
                           : AppColors.surfaceVariant,
                       borderRadius: BorderRadius.circular(10),
                       border: Border.all(
-                        color: sendWhatsApp && hasPhone
-                            ? const Color(0xFF25D366)
-                            : AppColors.border,
+                        color: sendToPrinter ? AppColors.primary : AppColors.border,
                       ),
                     ),
                     child: Row(children: [
-                      Icon(Icons.chat_rounded, size: 16,
-                          color: (sendWhatsApp && hasPhone)
-                              ? const Color(0xFF25D366)
-                              : AppColors.textMuted),
+                      Icon(Icons.print_rounded, size: 16,
+                          color: sendToPrinter ? AppColors.primary : AppColors.textMuted),
                       const SizedBox(width: 10),
                       Expanded(child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text('Send E-Bill via WhatsApp',
+                          Text('Send to Printer',
                               style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600,
-                                  color: (sendWhatsApp && hasPhone) ? const Color(0xFF25D366) : AppColors.textMuted)),
-                          Text(
-                            hasPhone
-                                ? 'To: ${cart.customerPhone.trim()}'
-                                : 'Enter customer phone number to enable',
-                            style: GoogleFonts.inter(fontSize: 11, color: AppColors.textMuted),
-                          ),
+                                  color: sendToPrinter ? AppColors.primary : AppColors.textMuted)),
+                          Text('Sends directly to default printer',
+                              style: GoogleFonts.inter(fontSize: 11, color: AppColors.textMuted)),
                         ],
                       )),
                       Switch(
-                        value: sendWhatsApp && hasPhone,
-                        onChanged: hasPhone ? (v) => setLocal(() => sendWhatsApp = v) : null,
+                        value: sendToPrinter,
+                        onChanged: (v) => setLocal(() => sendToPrinter = v),
+                        activeTrackColor: AppColors.primary,
+                        activeThumbColor: Colors.white,
+                      ),
+                    ]),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                InkWell(
+                  onTap: () => setLocal(() => sendWhatsApp = !sendWhatsApp),
+                  borderRadius: BorderRadius.circular(10),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: sendWhatsApp
+                          ? const Color(0xFF25D366).withValues(alpha: 0.08)
+                          : AppColors.surfaceVariant,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: sendWhatsApp ? const Color(0xFF25D366) : AppColors.border,
+                      ),
+                    ),
+                    child: Row(children: [
+                      Icon(Icons.chat_bubble_outline_rounded, size: 16,
+                          color: sendWhatsApp ? const Color(0xFF1AAD56) : AppColors.textMuted),
+                      const SizedBox(width: 10),
+                      Expanded(child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Send via WhatsApp',
+                              style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600,
+                                  color: sendWhatsApp ? const Color(0xFF1AAD56) : AppColors.textMuted)),
+                          Text('Opens WhatsApp Web with invoice',
+                              style: GoogleFonts.inter(fontSize: 11, color: AppColors.textMuted)),
+                        ],
+                      )),
+                      Switch(
+                        value: sendWhatsApp,
+                        onChanged: (v) => setLocal(() => sendWhatsApp = v),
                         activeTrackColor: const Color(0xFF25D366),
                         activeThumbColor: Colors.white,
                       ),
@@ -4714,13 +5373,17 @@ class _BillingScreenState extends State<BillingScreen> {
                   )),
                   const SizedBox(width: 10),
                   Expanded(child: ElevatedButton.icon(
-                    onPressed: !hasPrinter ? null : () {
+                    onPressed: () {
+                      final snapshot = _snapshotCart(cart);
                       Navigator.pop(ctx);
-                      _printCurrentBill(cart);
-                      if (sendWhatsApp && hasPhone) _showWhatsAppPanel(cart);
+                      if (sendToPrinter) _printCurrentBill(cart, docType: docType, toPrinter: true);
+                      if (sendWhatsApp) {
+                        _sendInvoiceViaWhatsApp(snapshot, phoneCtrl.text.trim(), docType: docType);
+                      }
                     },
-                    icon: const Icon(Icons.print_outlined, size: 15),
-                    label: Text('Print', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600)),
+                    icon: sendToPrinter ? const Icon(Icons.print_rounded, size: 15) : const SizedBox.shrink(),
+                    label: Text(sendToPrinter ? 'Print' : 'Confirm',
+                        style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600)),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppColors.primary,
                       foregroundColor: Colors.white,
@@ -4738,99 +5401,64 @@ class _BillingScreenState extends State<BillingScreen> {
     );
   }
 
-  void _showWhatsAppPanel(CartProvider cart) {
-    final tx = _snapshotCart(cart);
-    final phone = cart.customerPhone.trim();
-    final name = cart.customerName.trim();
-    final receiptName = 'Bill-${tx.id.substring(0, 6).toUpperCase()}';
-
-    showDialog(
-      context: context,
-      barrierDismissible: true,
-      builder: (_) => WhatsAppPanel(
-        customerPhone: phone.isEmpty ? null : phone,
-        customerName: name.isEmpty ? null : name,
-        pdfName: receiptName,
-        buildPdf: () => ReceiptPrinter.buildPdf(
-          tx,
-          storeName: _storeName,
-          storeAddress: _storeAddress,
-          storePhone: _storePhone,
-          storeEmail: _storeEmail,
-          storeGstin: _storeGstin,
-          receiptFooter: _receiptFooter,
-          taxLabel: _taxLabel,
-          taxRate: _taxRateDisplay,
-          currencySymbol: _currencySymbol,
-          paperSize: _paperSize,
-          orientation: _printOrientation,
-          layout: _invoiceLayout,
-          storeTerms: _storeTerms,
-          logoPath: _logoPath,
-        ),
-      ),
-    );
+  void _clearPrintingState() {
+    _printSafetyTimer?.cancel();
+    _printSafetyTimer = null;
+    if (mounted && _isPrinting) setState(() => _isPrinting = false);
   }
 
-  Future<void> _printRecord(TransactionRecord tx, {String? paperSize}) async {
-    if (_isPrinting) return;
+  Future<void> _printRecord(TransactionRecord tx, {String? paperSize, String docType = 'Invoice', bool toPrinter = false}) async {
+    _clearPrintingState();
+    if (!mounted) return;
     setState(() => _isPrinting = true);
+    _printSafetyTimer = Timer(const Duration(seconds: 30), _clearPrintingState);
 
-    final effectivePaperSize = paperSize ?? _paperSize;
-
-    // Step 1: build PDF bytes while loading overlay is visible.
-    Uint8List pdfBytes;
     try {
-      pdfBytes = await ReceiptPrinter.buildPdf(
+      final Uint8List pdfBytes = await ReceiptPrinter.buildPdf(
         tx,
         storeName: _storeName, storeAddress: _storeAddress,
         storePhone: _storePhone, storeEmail: _storeEmail,
         storeGstin: _storeGstin, receiptFooter: _receiptFooter,
         taxLabel: _taxLabel, taxRate: _taxRateDisplay,
-        currencySymbol: _currencySymbol, paperSize: effectivePaperSize,
+        currencySymbol: _currencySymbol, paperSize: paperSize ?? _paperSize,
         orientation: _printOrientation, layout: _invoiceLayout,
         storeTerms: _storeTerms, logoPath: _logoPath,
+        storeUpiId: _storeUpiId, docType: docType,
       );
-    } catch (e) {
-      if (mounted) {
-        setState(() => _isPrinting = false);
-        _showToast('Print failed: $e', isError: true);
-      }
-      return;
-    }
 
-    // Step 2: dismiss the loading overlay before opening the print dialog.
-    if (mounted) setState(() => _isPrinting = false);
+      _clearPrintingState();
 
-    // Step 3: send to printer or export to PDF.
-    try {
-      final receiptName = 'Receipt-${tx.id.substring(0, 6).toUpperCase()}';
-      final tmpDir = await Directory.systemTemp.createTemp('billcat_');
-      final pdfFile = File('${tmpDir.path}/$receiptName.pdf');
+      final receiptName = tx.invoiceNumber != null
+          ? 'Receipt-${tx.invoiceNumber}'
+          : 'Receipt-${tx.id.substring(0, 6).toUpperCase()}';
+
+      final tmp = await Directory.systemTemp.createTemp('billcat_');
+      final pdfFile = File('${tmp.path}/$receiptName.pdf');
       await pdfFile.writeAsBytes(pdfBytes);
-
-      if (_selectedPrinter == 'PDF Export') {
-        final home = Platform.environment['HOME'] ?? '';
-        final folder = Directory('$home/Desktop/BillCat Receipts');
-        if (!folder.existsSync()) folder.createSync(recursive: true);
-        final dest = File('${folder.path}/$receiptName.pdf');
-        await dest.writeAsBytes(pdfBytes);
-        if (mounted) _showToast('Saved to Desktop/BillCat Receipts');
-      } else {
-        // Send directly to printer via printing plugin — no Preview.app, no deadlock
-        if (_activePrinter == null) {
-          if (mounted) _showToast('No printer selected. Go to Settings → Printer.', isError: true);
-          return;
+      final ProcessResult result;
+      if (toPrinter) {
+        // lpr sends directly to the selected printer silently — no UI opens
+        final args = <String>[];
+        if (_selectedPrinter != 'System Default' && _selectedPrinter != 'PDF Export' && _selectedPrinter.isNotEmpty) {
+          args.addAll(['-P', _selectedPrinter]);
         }
-        await Printing.directPrintPdf(
-          printer: _activePrinter!,
-          onLayout: (_) async => pdfBytes,
-          name: receiptName,
-        );
-        if (mounted) _showToast('Sent to ${_activePrinter!.name}');
+        args.add(pdfFile.path);
+        result = await Process.run('lpr', args);
+      } else {
+        result = await Process.run('osascript', ['-e',
+  'tell application "Preview" to activate\n'
+  'tell application "Preview" to open POSIX file "${pdfFile.path}"\n'
+  'delay 1\n'
+  'tell application "System Events" to keystroke "p" using command down',
+]);
+      }
+      if (result.exitCode != 0 && mounted) {
+        _showToast('Could not print: ${result.stderr}', isError: true);
       }
     } catch (e) {
-      if (mounted) _showToast('Print failed: $e', isError: true);
+      if (mounted) _showToast('Could not open PDF: $e', isError: true);
+    } finally {
+      _clearPrintingState();
     }
   }
 
@@ -4850,56 +5478,110 @@ class _BillingScreenState extends State<BillingScreen> {
       );
 
   void _closeBill(BuildContext context, CartProvider cart) {
+    bool sendWaAfterClose = false;
+    final hasPhone = cart.customerPhone.isNotEmpty;
+    final hasWa = _waPhoneNumberId.isNotEmpty && _waAccessToken.isNotEmpty;
+
     showDialog(
       context: context,
-      builder: (_) => AlertDialog(
-        shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16)),
-        title: Row(children: [
-          const Icon(Icons.check_circle_rounded,
-              color: AppColors.success, size: 24),
-          const SizedBox(width: 8),
-          Text('Confirm Payment',
-              style: GoogleFonts.manrope(
-                  fontWeight: FontWeight.w700)),
-        ]),
-        content: Text(
-          'Charge $_currencySymbol${cart.total.toStringAsFixed(2)} for ${cart.itemCount} item(s)?',
-          style: GoogleFonts.inter(
-              color: AppColors.textMuted, fontSize: 14),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: Text('Cancel',
-                  style: GoogleFonts.inter(
-                      color: AppColors.textMuted))),
-          ElevatedButton(
-            onPressed: () async {
-              final snapshot = _snapshotCart(cart);
-              Navigator.pop(context);
-              await cart.checkout();
-              _customerNameCtrl.clear();
-              _customerPhoneCtrl.clear();
-              _loadProducts();
-              _loadDashboardData();
-              if (!context.mounted) return;
-              _showToast('Payment successful!');
-              if (_autoPrint) _printRecord(snapshot);
-              _autoSavePdf(snapshot);
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.success,
-              elevation: 0,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10)),
-            ),
-            child: Text('Confirm',
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16)),
+          title: Row(children: [
+            const Icon(Icons.check_circle_rounded,
+                color: AppColors.success, size: 24),
+            const SizedBox(width: 8),
+            Text('Confirm Payment',
+                style: GoogleFonts.manrope(
+                    fontWeight: FontWeight.w700)),
+          ]),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Charge $_currencySymbol${cart.total.toStringAsFixed(2)} for ${cart.itemCount} item(s)?',
                 style: GoogleFonts.inter(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w600)),
+                    color: AppColors.textMuted, fontSize: 14),
+              ),
+              if (hasPhone && hasWa) ...[
+                const SizedBox(height: 14),
+                InkWell(
+                  onTap: () => setLocal(() => sendWaAfterClose = !sendWaAfterClose),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: sendWaAfterClose
+                          ? const Color(0xFF25D366).withValues(alpha: 0.08)
+                          : const Color(0xFFF5F5F5),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                          color: sendWaAfterClose
+                              ? const Color(0xFF25D366)
+                              : const Color(0xFFE0E0E0)),
+                    ),
+                    child: Row(children: [
+                      Icon(Icons.chat_bubble_outline_rounded, size: 15,
+                          color: sendWaAfterClose ? const Color(0xFF1AAD56) : AppColors.textMuted),
+                      const SizedBox(width: 8),
+                      Expanded(child: Text('Send invoice via WhatsApp',
+                          style: GoogleFonts.inter(fontSize: 12.5, fontWeight: FontWeight.w500,
+                              color: sendWaAfterClose ? const Color(0xFF1AAD56) : AppColors.textMuted))),
+                      Switch(
+                        value: sendWaAfterClose,
+                        onChanged: (v) => setLocal(() => sendWaAfterClose = v),
+                        activeTrackColor: const Color(0xFF25D366),
+                        activeThumbColor: Colors.white,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                    ]),
+                  ),
+                ),
+              ],
+            ],
           ),
-        ],
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: Text('Cancel',
+                    style: GoogleFonts.inter(
+                        color: AppColors.textMuted))),
+            ElevatedButton(
+              onPressed: () async {
+                final invNum = LocalDbService.generateInvoiceId();
+                final snapshot = _snapshotCart(cart, invoiceNumber: invNum);
+                final phone = cart.customerPhone;
+                Navigator.pop(ctx);
+                await cart.checkout(invoiceNumber: invNum);
+                _customerNameCtrl.clear();
+                _customerPhoneCtrl.clear();
+                _loadProducts();
+                _loadDashboardData();
+                if (!context.mounted) return;
+                _showToast('Payment successful!');
+                if (_autoPrint) {
+                  await _printRecord(snapshot);
+                }
+                _autoSavePdf(snapshot);
+                if (sendWaAfterClose) {
+                  _sendInvoiceViaWhatsApp(snapshot, phone);
+                }
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.success,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10)),
+              ),
+              child: Text('Confirm',
+                  style: GoogleFonts.inter(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600)),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -4915,13 +5597,264 @@ class _BillingScreenState extends State<BillingScreen> {
         currencySymbol: _currencySymbol, paperSize: _paperSize,
         orientation: _printOrientation, layout: _invoiceLayout,
         storeTerms: _storeTerms, logoPath: _logoPath,
+        storeUpiId: _storeUpiId,
       );
       final home = Platform.environment['HOME'] ?? '';
-      final folder = Directory('$home/Desktop/BillCat Receipts');
+      final safeName = _storeName.trim().isEmpty ? 'BillCat' : _storeName.trim();
+      final folder = Directory('$home/Documents/$safeName Receipts');
       if (!folder.existsSync()) folder.createSync(recursive: true);
-      final receiptName = 'Receipt-${tx.id.substring(0, 6).toUpperCase()}';
+      final receiptName = tx.invoiceNumber != null
+          ? 'Receipt-${tx.invoiceNumber}'
+          : 'Receipt-${tx.id.substring(0, 6).toUpperCase()}';
       await File('${folder.path}/$receiptName.pdf').writeAsBytes(pdfBytes);
     } catch (_) {}
+  }
+
+  Future<void> _sendInvoiceViaWhatsApp(TransactionRecord tx, String phone, {String docType = 'Invoice'}) async {
+    if (phone.isEmpty) {
+      _showToast('No customer phone number to send to.', isError: true);
+      return;
+    }
+
+    final invoiceNo = tx.invoiceNumber ?? tx.id.substring(0, 6).toUpperCase();
+    final rawUid = Supabase.instance.client.auth.currentUser?.id ?? 'unknown';
+    final shortUid = rawUid.replaceAll('-', '').substring(0, rawUid.length >= 6 ? 6 : rawUid.length).toUpperCase();
+    final invoiceLink = 'https://billcat.in/invoice/$shortUid/$_branchNumber/Bill-$invoiceNo';
+
+    // If Meta API is configured, send directly
+    if (_waPhoneNumberId.isNotEmpty && _waAccessToken.isNotEmpty) {
+      _showToast('Sending via WhatsApp...');
+      try {
+        final pdfBytes = await ReceiptPrinter.buildPdf(
+          tx,
+          storeName: _storeName, storeAddress: _storeAddress,
+          storePhone: _storePhone, storeEmail: _storeEmail,
+          storeGstin: _storeGstin, receiptFooter: _receiptFooter,
+          taxLabel: _taxLabel, taxRate: _taxRateDisplay,
+          currencySymbol: _currencySymbol, paperSize: _paperSize,
+          orientation: _printOrientation, layout: _invoiceLayout,
+          storeTerms: _storeTerms, logoPath: _logoPath,
+          storeUpiId: _storeUpiId, docType: docType,
+        );
+        final svc = _wa.WhatsAppService(
+            phoneNumberId: _waPhoneNumberId, accessToken: _waAccessToken);
+        final ok = await svc.sendInvoicePdf(
+          toPhone: phone,
+          pdfBytes: pdfBytes,
+          invoiceNo: invoiceNo,
+          storeName: _storeName,
+          customerName: tx.customerName ?? '',
+          amount: '$_currencySymbol${tx.total.toStringAsFixed(2)}',
+          date: '${tx.createdAt.day}/${tx.createdAt.month}/${tx.createdAt.year}',
+          docType: docType,
+          invoiceLink: invoiceLink,
+        );
+        if (mounted) _showToast(ok ? 'Invoice sent via WhatsApp!' : 'WhatsApp send failed.', isError: !ok);
+      } catch (e) {
+        if (mounted) _showToast('WhatsApp error: $e', isError: true);
+      }
+      return;
+    }
+
+    // Fallback: open WhatsApp Web with pre-filled message
+    try {
+      // Normalize: strip formatting, prepend dial code if no country code present
+      String normalized = phone.replaceAll(RegExp(r'[\s\-().]'), '');
+      if (!normalized.startsWith('+') && !normalized.startsWith('00')) {
+        normalized = _dialCode + normalized.replaceFirst(RegExp(r'^0'), '');
+      }
+      normalized = normalized.replaceAll('+', '');
+
+      final customerName = (tx.customerName?.isNotEmpty ?? false) ? tx.customerName! : 'Valued Customer';
+      final dateStr = '${tx.createdAt.day}/${tx.createdAt.month}/${tx.createdAt.year}';
+      final message = Uri.encodeComponent(
+        'Hello $customerName,\n\n'
+        'Thank you for choosing $_storeName.\n'
+        'Your e-bill for $docType #$invoiceNo has been generated successfully.\n\n'
+        'Amount: $_currencySymbol${tx.total.toStringAsFixed(2)}\n'
+        'Date: $dateStr\n'
+        'Payment Status: Paid\n\n'
+        'For any queries, feel free to contact us.\n'
+        'Thank you for your support!\n\n'
+        '— $_storeName\n\n'
+        '$invoiceLink',
+      );
+      final url = 'https://web.whatsapp.com/send?phone=$normalized&text=$message';
+      // Reuse existing WhatsApp Web tab in Chrome if open, else open new tab
+      final appleScript = '''
+tell application "Google Chrome"
+  set didReuse to false
+  repeat with w in windows
+    set tabIdx to 0
+    repeat with t in tabs of w
+      set tabIdx to tabIdx + 1
+      if (URL of t) starts with "https://web.whatsapp.com" then
+        set URL of t to "$url"
+        set index of w to 1
+        set active tab index of w to tabIdx
+        set didReuse to true
+        exit repeat
+      end if
+    end repeat
+    if didReuse then exit repeat
+  end repeat
+  if not didReuse then
+    if (count of windows) > 0 then
+      tell front window to make new tab with properties {URL:"$url"}
+    else
+      open location "$url"
+    end if
+  end if
+  activate
+end tell
+''';
+      final result = await Process.run('osascript', ['-e', appleScript]);
+      if (result.exitCode != 0) {
+        // Fallback if Chrome isn't running
+        await Process.run('open', [url]);
+      }
+
+      if (mounted) _showToast('Opening WhatsApp Web...');
+    } catch (e) {
+      if (mounted) _showToast('Error: $e', isError: true);
+    }
+  }
+
+  void _showAddCustomerDialog(CartProvider cart) {
+    final nameCtrl = TextEditingController(text: _customerNameCtrl.text);
+    final phoneCtrl = TextEditingController(text: _customerPhoneCtrl.text);
+    final addressCtrl = TextEditingController();
+    final phoneFocus = FocusNode();
+    final addressFocus = FocusNode();
+
+    Future<void> doSave(BuildContext ctx) async {
+      final name = nameCtrl.text.trim();
+      if (name.isEmpty) return;
+      await LocalDbService.upsertCustomerByPhone(
+        name: name,
+        phone: phoneCtrl.text.trim().isEmpty ? null : phoneCtrl.text.trim(),
+        address: addressCtrl.text.trim().isEmpty ? null : addressCtrl.text.trim(),
+      );
+      _customerNameCtrl.text = name;
+      _customerPhoneCtrl.text = phoneCtrl.text.trim();
+      cart.customerName = name;
+      cart.customerPhone = phoneCtrl.text.trim();
+      if (ConnectivityService.instance.isOnline) {
+        ConnectivityService.instance.syncNow();
+      }
+      if (context.mounted) {
+        Navigator.pop(ctx);
+        _showToast('Customer saved!');
+      }
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: SizedBox(
+          width: 400,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // ── Header ──────────────────────────────────────────────
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 18),
+                decoration: const BoxDecoration(
+                  color: AppColors.surfaceVariant,
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+                  border: Border(bottom: BorderSide(color: AppColors.border)),
+                ),
+                child: Row(children: [
+                  const Icon(Icons.person_add_rounded, color: AppColors.primary, size: 20),
+                  const SizedBox(width: 10),
+                  Text('Add Customer', style: GoogleFonts.manrope(
+                      fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textDark)),
+                  const Spacer(),
+                  IconButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    icon: const Icon(Icons.close_rounded, size: 18, color: AppColors.textMuted),
+                    style: IconButton.styleFrom(minimumSize: const Size(32, 32), padding: EdgeInsets.zero),
+                  ),
+                ]),
+              ),
+              // ── Fields ───────────────────────────────────────────────
+              Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  _dlgLabel('CUSTOMER NAME'),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: nameCtrl,
+                    autofocus: true,
+                    textInputAction: TextInputAction.next,
+                    onSubmitted: (_) {
+                      if (phoneCtrl.text.trim().isNotEmpty) {
+                        doSave(ctx);
+                      } else {
+                        phoneFocus.requestFocus();
+                      }
+                    },
+                    style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
+                    decoration: _dlgInputDecor('e.g. Ravi Kumar'),
+                  ),
+                  const SizedBox(height: 16),
+                  _dlgLabel('PHONE NUMBER'),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: phoneCtrl,
+                    focusNode: phoneFocus,
+                    keyboardType: TextInputType.phone,
+                    textInputAction: TextInputAction.done,
+                    onSubmitted: (_) => doSave(ctx),
+                    style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
+                    decoration: _dlgInputDecor('e.g. 9876543210'),
+                  ),
+                  const SizedBox(height: 16),
+                  _dlgLabel('ADDRESS (OPTIONAL)'),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: addressCtrl,
+                    focusNode: addressFocus,
+                    maxLines: 2,
+                    textInputAction: TextInputAction.done,
+                    onSubmitted: (_) => doSave(ctx),
+                    style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
+                    decoration: _dlgInputDecor('Street, city…'),
+                  ),
+                  const SizedBox(height: 24),
+                  // ── Actions ───────────────────────────────────────────
+                  Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                      ),
+                      child: Text('Cancel',
+                          style: GoogleFonts.inter(color: AppColors.textMuted, fontWeight: FontWeight.w500)),
+                    ),
+                    const SizedBox(width: 8),
+                    ElevatedButton(
+                      onPressed: () => doSave(ctx),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.primary,
+                        elevation: 0,
+                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      ),
+                      child: Text('Save Customer',
+                          style: GoogleFonts.inter(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13)),
+                    ),
+                  ]),
+                ]),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   void _showCustomProductDialog(CartProvider cart) {
@@ -5003,6 +5936,475 @@ class _BillingScreenState extends State<BillingScreen> {
     );
   }
 
+  // ── Bulk Barcode Print View ──────────────────────────────────────────────────
+
+  void _showBulkPrintDialog() {
+    final labelWCtrl  = TextEditingController(text: _barcodeLabelW.toStringAsFixed(_barcodeLabelW == _barcodeLabelW.truncateToDouble() ? 0 : 1));
+    final labelHCtrl  = TextEditingController(text: _barcodeLabelH.toStringAsFixed(_barcodeLabelH == _barcodeLabelH.truncateToDouble() ? 0 : 1));
+    final perRowCtrl  = TextEditingController(text: '$_barcodePerRow');
+    final searchCtrl  = TextEditingController();
+    final qtys        = Map<String, int>.from(_bulkPrintQtys);
+    final selected    = Map<String, bool>.from(_bulkPrintSelected);
+    final printers    = List<String>.from(_bulkPrinters);
+    String printer    = _barcodePrinter;
+    String searchQ    = '';
+
+    // Per-product qty TextEditingControllers
+    final qtyCtrlMap = <String, TextEditingController>{
+      for (final p in _products) p.id: TextEditingController(text: '${qtys[p.id] ?? 1}'),
+    };
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setLocal) {
+        final addedProducts = _products.where((p) => selected[p.id] == true).toList();
+        final searchResults = searchQ.isEmpty ? <Product>[] : _products.where((p) {
+          if (selected[p.id] == true) return false; // already added
+          final q = searchQ.toLowerCase();
+          return p.name.toLowerCase().contains(q) || p.sku.toLowerCase().contains(q);
+        }).toList();
+        final total = addedProducts.fold<int>(0, (s, p) => s + (qtys[p.id] ?? 0));
+
+        return Dialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          elevation: 0,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 60, vertical: 40),
+          child: SizedBox(
+            width: 620,
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              // ── Header ──
+              Padding(
+                padding: const EdgeInsets.fromLTRB(22, 20, 18, 16),
+                child: Row(children: [
+                  Text('Print Barcodes', style: GoogleFonts.manrope(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textDark)),
+                  const Spacer(),
+                  InkWell(
+                    onTap: () => Navigator.pop(ctx),
+                    borderRadius: BorderRadius.circular(7),
+                    child: Container(width: 28, height: 28,
+                      decoration: BoxDecoration(color: AppColors.surfaceVariant, borderRadius: BorderRadius.circular(7)),
+                      child: const Icon(Icons.close_rounded, size: 15, color: AppColors.textMuted)),
+                  ),
+                ]),
+              ),
+              // ── Settings bar ──
+              Container(
+                margin: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(color: AppColors.surfaceVariant, borderRadius: BorderRadius.circular(10)),
+                child: Row(children: [
+                  Text('Size', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
+                  const SizedBox(width: 7),
+                  _miniNumField(labelWCtrl, 'W', 60),
+                  const SizedBox(width: 5),
+                  _miniNumField(labelHCtrl, 'H', 60),
+                  const SizedBox(width: 16),
+                  Text('Per Row', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
+                  const SizedBox(width: 7),
+                  _miniNumField(perRowCtrl, '', 44),
+                  const SizedBox(width: 16),
+                  const Icon(Icons.print_outlined, size: 14, color: AppColors.textMuted),
+                  const SizedBox(width: 6),
+                  Expanded(child: DropdownButtonHideUnderline(child: DropdownButton<String>(
+                    value: printers.contains(printer) ? printer : 'System Default',
+                    isDense: true, isExpanded: true,
+                    icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 14, color: AppColors.textMuted),
+                    items: printers.map((n) => DropdownMenuItem(value: n,
+                      child: Text(n, style: GoogleFonts.inter(fontSize: 12, color: AppColors.textDark), overflow: TextOverflow.ellipsis))).toList(),
+                    onChanged: (v) => setLocal(() => printer = v ?? 'System Default'),
+                    style: GoogleFonts.inter(fontSize: 12, color: AppColors.textDark),
+                  ))),
+                ]),
+              ),
+              // ── Search to add ──
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                child: Column(children: [
+                  Container(
+                    height: 38,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: AppColors.border),
+                    ),
+                    child: Row(children: [
+                      const SizedBox(width: 10),
+                      const Icon(Icons.add_circle_outline_rounded, size: 16, color: AppColors.textMuted),
+                      const SizedBox(width: 8),
+                      Expanded(child: TextField(
+                        controller: searchCtrl,
+                        onChanged: (v) => setLocal(() => searchQ = v),
+                        style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
+                        decoration: InputDecoration(
+                          isDense: true, border: InputBorder.none,
+                          hintText: 'Search to add products…',
+                          hintStyle: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      )),
+                      if (searchQ.isNotEmpty) InkWell(
+                        onTap: () { searchCtrl.clear(); setLocal(() => searchQ = ''); },
+                        borderRadius: BorderRadius.circular(12),
+                        child: const Padding(padding: EdgeInsets.all(6),
+                          child: Icon(Icons.close_rounded, size: 14, color: AppColors.textMuted)),
+                      ),
+                      const SizedBox(width: 6),
+                    ]),
+                  ),
+                  // Search results dropdown
+                  if (searchResults.isNotEmpty) Container(
+                    constraints: const BoxConstraints(maxHeight: 180),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: AppColors.border),
+                      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8, offset: const Offset(0, 3))],
+                    ),
+                    child: ListView.separated(
+                      shrinkWrap: true,
+                      itemCount: searchResults.length,
+                      separatorBuilder: (_, __) => Divider(height: 1, color: AppColors.border),
+                      itemBuilder: (_, i) {
+                        final p = searchResults[i];
+                        return InkWell(
+                          onTap: () {
+                            setLocal(() {
+                              selected[p.id] = true;
+                              if (!qtys.containsKey(p.id)) { qtys[p.id] = p.stock > 0 ? p.stock : 1; qtyCtrlMap[p.id]?.text = '${qtys[p.id]}'; }
+                              searchCtrl.clear(); searchQ = '';
+                            });
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                            child: Row(children: [
+                              Container(width: 44, height: 20,
+                                decoration: BoxDecoration(color: const Color(0xFFF5F5F5), borderRadius: BorderRadius.circular(3)),
+                                child: CustomPaint(painter: _BarcodePainter(p.sku))),
+                              const SizedBox(width: 10),
+                              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                Text(p.name, style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textDark), maxLines: 1, overflow: TextOverflow.ellipsis),
+                                Text('${p.sku}  ·  ${p.stock} in stock', style: GoogleFonts.inter(fontSize: 10, color: AppColors.textMuted)),
+                              ])),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                decoration: BoxDecoration(color: AppColors.primary.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(6)),
+                                child: Text('Add', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.primary)),
+                              ),
+                            ]),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ]),
+              ),
+              // ── Added products grid ──
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 340),
+                  child: addedProducts.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 32),
+                        child: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+                          Icon(Icons.inbox_outlined, size: 32, color: AppColors.textMuted.withValues(alpha: 0.4)),
+                          const SizedBox(height: 8),
+                          Text('Search above to add products', style: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted)),
+                        ])),
+                      )
+                    : GridView.builder(
+                        shrinkWrap: true,
+                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 3,
+                          crossAxisSpacing: 10,
+                          mainAxisSpacing: 10,
+                          childAspectRatio: 1.3,
+                        ),
+                        itemCount: addedProducts.length,
+                        itemBuilder: (_, i) {
+                          final p = addedProducts[i];
+                          final qty = qtys[p.id] ?? 1;
+                          final qtyCtrl = qtyCtrlMap[p.id] ??= TextEditingController(text: '$qty');
+                          return Container(
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: AppColors.border),
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                // Name + remove
+                                Row(children: [
+                                  Expanded(child: Text(p.name,
+                                    style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textDark),
+                                    maxLines: 1, overflow: TextOverflow.ellipsis)),
+                                  InkWell(
+                                    onTap: () => setLocal(() => selected[p.id] = false),
+                                    borderRadius: BorderRadius.circular(10),
+                                    child: const Padding(padding: EdgeInsets.all(2),
+                                      child: Icon(Icons.close_rounded, size: 13, color: AppColors.textMuted)),
+                                  ),
+                                ]),
+                                const SizedBox(height: 5),
+                                // Barcode
+                                Container(
+                                  width: double.infinity, height: 30,
+                                  decoration: BoxDecoration(color: const Color(0xFFF5F5F5), borderRadius: BorderRadius.circular(5)),
+                                  child: CustomPaint(painter: _BarcodePainter(p.sku))),
+                                const SizedBox(height: 4),
+                                Text(p.sku, style: GoogleFonts.inter(fontSize: 9, color: AppColors.textMuted)),
+                                const Spacer(),
+                                // Editable qty stepper
+                                Container(
+                                  height: 28,
+                                  decoration: BoxDecoration(color: AppColors.surfaceVariant, borderRadius: BorderRadius.circular(7)),
+                                  child: Row(children: [
+                                    InkWell(
+                                      onTap: qty > 1 ? () { setLocal(() => qtys[p.id] = qty - 1); qtyCtrl.text = '${qty - 1}'; } : null,
+                                      borderRadius: const BorderRadius.horizontal(left: Radius.circular(6)),
+                                      child: Container(width: 26, height: 28, alignment: Alignment.center,
+                                        child: Icon(Icons.remove_rounded, size: 11, color: qty > 1 ? AppColors.textDark : AppColors.textMuted))),
+                                    Container(width: 1, height: 16, color: AppColors.border),
+                                    Expanded(child: TextFormField(
+                                      controller: qtyCtrl,
+                                      keyboardType: TextInputType.number,
+                                      textAlign: TextAlign.center,
+                                      style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textDark),
+                                      decoration: const InputDecoration(isDense: true, border: InputBorder.none, contentPadding: EdgeInsets.zero),
+                                      onChanged: (v) { final n = int.tryParse(v); if (n != null && n > 0) setLocal(() => qtys[p.id] = n); },
+                                    )),
+                                    Container(width: 1, height: 16, color: AppColors.border),
+                                    InkWell(
+                                      onTap: () { setLocal(() => qtys[p.id] = qty + 1); qtyCtrl.text = '${qty + 1}'; },
+                                      borderRadius: const BorderRadius.horizontal(right: Radius.circular(6)),
+                                      child: Container(width: 26, height: 28, alignment: Alignment.center,
+                                        child: const Icon(Icons.add_rounded, size: 11, color: AppColors.textDark))),
+                                  ]),
+                                ),
+                              ]),
+                            ),
+                          );
+                        },
+                      ),
+                ),
+              ),
+              const SizedBox(height: 4),
+              // ── Footer ──
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+                child: Row(children: [
+                  Text('$total label${total != 1 ? 's' : ''} to print',
+                      style: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted)),
+                  const Spacer(),
+                  OutlinedButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
+                      side: const BorderSide(color: AppColors.border),
+                      foregroundColor: AppColors.textMuted,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                    child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w500)),
+                  ),
+                  const SizedBox(width: 10),
+                  ElevatedButton.icon(
+                    onPressed: total == 0 ? null : () async {
+                      final w = double.tryParse(labelWCtrl.text) ?? _barcodeLabelW;
+                      final h = double.tryParse(labelHCtrl.text) ?? _barcodeLabelH;
+                      final perRow = int.tryParse(perRowCtrl.text) ?? _barcodePerRow;
+                      Navigator.pop(ctx);
+                      setState(() { _barcodeLabelW = w; _barcodeLabelH = h; _barcodePerRow = perRow; _barcodePrinter = printer; });
+                      LocalDbService.saveSettings({'barcode_label_w': w.toString(), 'barcode_label_h': h.toString(), 'barcode_per_row': perRow.toString(), 'barcode_printer': printer});
+                      final selProducts = _products.where((p) => selected[p.id] == true).toList();
+                      await _printAllBarcodesWithQty(selProducts, qtys, labelW: w, labelH: h, labelsPerRow: perRow, printerName: printer);
+                    },
+                    icon: const Icon(Icons.print_rounded, size: 15),
+                    label: Text('Print $total Label${total != 1 ? 's' : ''}',
+                        style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600)),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.primary, foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 11),
+                      elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ]),
+              ),
+            ]),
+          ),
+        );
+      }),
+    );
+  }
+
+  Widget _miniNumField(TextEditingController ctrl, String suffix, double width) => Container(
+    width: width,
+    height: 30,
+    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(7), border: Border.all(color: AppColors.border)),
+    child: Row(children: [
+      Expanded(child: TextFormField(
+        controller: ctrl, keyboardType: TextInputType.number, textAlign: TextAlign.center,
+        style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textDark),
+        decoration: const InputDecoration(isDense: true, border: InputBorder.none, contentPadding: EdgeInsets.symmetric(vertical: 6, horizontal: 4)),
+      )),
+      if (suffix.isNotEmpty) Padding(padding: const EdgeInsets.only(right: 5),
+        child: Text(suffix, style: GoogleFonts.inter(fontSize: 10, color: AppColors.textMuted))),
+    ]),
+  );
+
+  Future<void> _printAllBarcodesWithQty(List<Product> products, Map<String, int> qtys,
+      {double labelW = 58, double labelH = 30, int labelsPerRow = 1, String? printerName}) async {
+    if (products.isEmpty) return;
+
+    final regularData = await rootBundle.load('assets/fonts/NotoSans-Regular.ttf');
+    final boldData    = await rootBundle.load('assets/fonts/NotoSans-Bold.ttf');
+    final regular = pw.Font.ttf(regularData);
+    final bold    = pw.Font.ttf(boldData);
+
+    final doc = pw.Document();
+    // labelW x labelH = ONE sticker; page = perRow stickers + gaps + side margins
+    const gapMm = 0.5;
+    const marginMm = 2.0;
+    final gap = gapMm * PdfPageFormat.mm;
+    final margin = marginMm * PdfPageFormat.mm;
+    final cellW = labelW * PdfPageFormat.mm;
+    final cellH = labelH * PdfPageFormat.mm;
+    final pageW = margin * 2 + labelsPerRow * cellW + (labelsPerRow - 1) * gap;
+    final pageH = cellH;
+    final pageFormat = PdfPageFormat(pageW, pageH);
+    final pad = 0.5 * PdfPageFormat.mm;
+
+    // Collect all labels across all products in order
+    final allLabels = <pw.Widget>[];
+    for (final p in products) {
+      final count = qtys[p.id] ?? 1;
+      final svgStr = bc.Barcode.code128().toSvg(p.sku, width: 200, height: 80, drawText: false);
+      final innerPad = 5.0 * PdfPageFormat.mm;
+      pw.Widget labelCell() => pw.Container(
+        width: cellW, height: cellH,
+        padding: pw.EdgeInsets.symmetric(horizontal: innerPad, vertical: 1.5 * PdfPageFormat.mm),
+        child: pw.Column(mainAxisAlignment: pw.MainAxisAlignment.center, children: [
+          pw.SvgImage(svg: svgStr, width: (cellW - innerPad * 2), height: (cellH - 2 * PdfPageFormat.mm) * 0.62),
+          pw.Text(p.sku, style: pw.TextStyle(font: bold, fontSize: 4.5, letterSpacing: 0.4), textAlign: pw.TextAlign.center),
+          pw.Text('$_currencySymbol${p.price.toStringAsFixed(2)}', style: pw.TextStyle(font: bold, fontSize: 4.5), textAlign: pw.TextAlign.center),
+        ]),
+      );
+      for (int i = 0; i < count; i++) allLabels.add(labelCell());
+    }
+
+    for (int start = 0; start < allLabels.length; start += labelsPerRow) {
+      final rowCells = allLabels.sublist(start, (start + labelsPerRow).clamp(0, allLabels.length));
+      doc.addPage(pw.Page(
+        pageFormat: pageFormat,
+        margin: pw.EdgeInsets.symmetric(horizontal: margin),
+        build: (_) {
+          final cells = <pw.Widget>[];
+          for (int i = 0; i < rowCells.length; i++) {
+            if (i > 0) cells.add(pw.SizedBox(width: gap));
+            cells.add(rowCells[i]);
+          }
+          return pw.Row(children: cells);
+        },
+      ));
+    }
+
+    final bytes = await doc.save();
+    if (!mounted) return;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        child: Container(
+          width: 400,
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(children: [
+                Text('Print Preview',
+                    style: GoogleFonts.manrope(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textDark)),
+                const Spacer(),
+                IconButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  icon: const Icon(Icons.close_rounded, size: 20),
+                  style: IconButton.styleFrom(foregroundColor: AppColors.textMuted),
+                ),
+              ]),
+              const SizedBox(height: 16),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: SizedBox(
+                  width: double.infinity,
+                  height: 260,
+                  child: PdfPreview(
+                    build: (_) async => bytes,
+                    canChangePageFormat: false,
+                    canChangeOrientation: false,
+                    canDebug: false,
+                    allowPrinting: false,
+                    allowSharing: false,
+                    scrollViewDecoration: const BoxDecoration(color: Color(0xFFF5F5F5)),
+                    pdfPreviewPageDecoration: BoxDecoration(
+                      color: Colors.white,
+                      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.12), blurRadius: 6, offset: const Offset(0, 2))],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              Row(children: [
+                Expanded(child: OutlinedButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    side: const BorderSide(color: AppColors.border),
+                    foregroundColor: AppColors.textDark,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                  child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w500)),
+                )),
+                const SizedBox(width: 10),
+                Expanded(child: ElevatedButton.icon(
+                  onPressed: () async {
+                    Navigator.pop(ctx);
+                    final tmp = await Directory.systemTemp.createTemp('billcat_bulk_');
+                    final pdfFile = File('${tmp.path}/Barcodes.pdf');
+                    await pdfFile.writeAsBytes(bytes);
+                    final sheetW = marginMm * 2 + labelsPerRow * labelW + (labelsPerRow - 1) * gapMm;
+                    final sheetH = labelH;
+                    final targetPrinter = (printerName != null && printerName != 'System Default') ? printerName : null;
+                    if (targetPrinter != null) {
+                      final wPt = (sheetW / 25.4 * 72).round();
+                      final hPt = (sheetH / 25.4 * 72).round();
+                      final result = await Process.run('lpr', ['-P', targetPrinter, '-o', 'fit-to-page=false', '-o', 'media=Custom.${wPt}x$hPt', '-o', 'scaling=100', pdfFile.path]);
+                      if (result.exitCode != 0 && mounted) _showToast('Print failed: ${result.stderr}', isError: true);
+                    } else {
+                      await Process.run('osascript', ['-e',
+'tell application "Preview" to activate\n'
+'tell application "Preview" to open POSIX file "${pdfFile.path}"\n'
+'delay 1.5\n'
+'tell application "System Events" to keystroke "p" using command down',
+                      ]);
+                    }
+                    if (mounted) _showToast('Sent to ${targetPrinter ?? 'printer'}');
+                  },
+                  icon: const Icon(Icons.print_rounded, size: 15),
+                  label: Text('Print', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primary, foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                )),
+              ]),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   // ── Inventory View ───────────────────────────────────────────────────────────
 
   Widget _buildInventoryView() {
@@ -5034,11 +6436,22 @@ class _BillingScreenState extends State<BillingScreen> {
                   style: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted)),
             ]),
             const Spacer(),
-            _statChip('${_products.length}', 'Total', AppColors.primary),
-            const SizedBox(width: 10),
-            _statChip('$lowStock', 'Low Stock', const Color(0xFFF59E0B)),
-            const SizedBox(width: 10),
-            _statChip('$outOfStock', 'Out of Stock', AppColors.error),
+            // Stats + Print Barcodes row
+            Container(
+              height: 52,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.border),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                _statCell('${_products.length}', 'TOTAL', AppColors.textDark, first: true),
+                _statDivider(),
+                _statCell('$lowStock', 'LOW STOCK', const Color(0xFFF59E0B)),
+                _statDivider(),
+                _statCell('$outOfStock', 'OUT OF STOCK', AppColors.error, last: true),
+              ]),
+            ),
           ]),
           const SizedBox(height: 18),
           // Search bar
@@ -5141,7 +6554,8 @@ class _BillingScreenState extends State<BillingScreen> {
               for (final p in affected) {
                 final updated = Product(id: p.id, name: p.name, price: p.price,
                     buyingPrice: p.buyingPrice, taxPercent: p.taxPercent,
-                    category: '', emoji: p.emoji, sku: p.sku, stock: p.stock);
+                    category: '', emoji: p.emoji, sku: p.sku, stock: p.stock,
+                    description: p.description);
                 await LocalDbService.updateProduct(updated);
               }
               setState(() {
@@ -5151,7 +6565,8 @@ class _BillingScreenState extends State<BillingScreen> {
                     _products[i] = Product(id: _products[i].id, name: _products[i].name,
                         price: _products[i].price, buyingPrice: _products[i].buyingPrice,
                         taxPercent: _products[i].taxPercent, category: '',
-                        emoji: _products[i].emoji, sku: _products[i].sku, stock: _products[i].stock);
+                        emoji: _products[i].emoji, sku: _products[i].sku, stock: _products[i].stock,
+                        description: _products[i].description);
                   }
                 }
                 if (_inventoryCategoryFilter == category) _inventoryCategoryFilter = 'All';
@@ -5176,7 +6591,8 @@ class _BillingScreenState extends State<BillingScreen> {
               for (final p in affected) {
                 final updated = Product(id: p.id, name: p.name, price: p.price,
                     buyingPrice: p.buyingPrice, taxPercent: p.taxPercent,
-                    category: newName, emoji: p.emoji, sku: p.sku, stock: p.stock);
+                    category: newName, emoji: p.emoji, sku: p.sku, stock: p.stock,
+                    description: p.description);
                 await LocalDbService.updateProduct(updated);
               }
               setState(() {
@@ -5187,7 +6603,8 @@ class _BillingScreenState extends State<BillingScreen> {
                     _products[i] = Product(id: _products[i].id, name: _products[i].name,
                         price: _products[i].price, buyingPrice: _products[i].buyingPrice,
                         taxPercent: _products[i].taxPercent, category: newName,
-                        emoji: _products[i].emoji, sku: _products[i].sku, stock: _products[i].stock);
+                        emoji: _products[i].emoji, sku: _products[i].sku, stock: _products[i].stock,
+                        description: _products[i].description);
                   }
                 }
                 if (_inventoryCategoryFilter == category) _inventoryCategoryFilter = newName;
@@ -5204,33 +6621,24 @@ class _BillingScreenState extends State<BillingScreen> {
     );
   }
 
-  Widget _statChip(String value, String label, Color color) {
-    return Container(
-      padding:
-          const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: color.withValues(alpha: 0.2)),
-      ),
+  Widget _statCell(String value, String label, Color color, {bool first = false, bool last = false}) {
+    return Padding(
+      padding: EdgeInsets.only(left: first ? 20 : 16, right: last ? 20 : 16),
       child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
         crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
         children: [
           Text(value,
-              style: GoogleFonts.manrope(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w700,
-                  color: color)),
+              style: GoogleFonts.manrope(fontSize: 17, fontWeight: FontWeight.w700, color: color)),
+          const SizedBox(height: 1),
           Text(label,
-              style: GoogleFonts.inter(
-                  fontSize: 11,
-                  color: color,
-                  fontWeight: FontWeight.w500)),
+              style: GoogleFonts.inter(fontSize: 9, color: AppColors.textMuted, fontWeight: FontWeight.w600, letterSpacing: 0.5)),
         ],
       ),
     );
   }
+
+  Widget _statDivider() => Container(width: 1, height: 24, color: AppColors.border);
 
   Widget _colHeader(String text) => Text(text,
       style: GoogleFonts.inter(
@@ -5305,14 +6713,8 @@ class _BillingScreenState extends State<BillingScreen> {
                 width: 44, height: 44,
                 child: p.emoji.startsWith('/')
                     ? Image.file(File(p.emoji), fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => Container(
-                          color: AppColors.surfaceVariant,
-                          child: const Center(child: Text('📦', style: TextStyle(fontSize: 22)))))
-                    : Container(
-                        color: AppColors.surfaceVariant,
-                        child: Center(child: Text(
-                            p.emoji.isEmpty ? '📦' : p.emoji,
-                            style: const TextStyle(fontSize: 22)))),
+                        errorBuilder: (_, __, ___) => _MediumInitialsBox(name: p.name, radius: 10))
+                    : _MediumInitialsBox(name: p.name, radius: 10),
               ),
             ),
             const Spacer(),
@@ -5329,6 +6731,12 @@ class _BillingScreenState extends State<BillingScreen> {
                       const SizedBox(width: 8),
                       Text('Edit', style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark)),
                     ])),
+                PopupMenuItem(value: 'barcode', height: 38,
+                    child: Row(children: [
+                      const Icon(Icons.barcode_reader, size: 14, color: AppColors.textMuted),
+                      const SizedBox(width: 8),
+                      Text('Print Barcode', style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark)),
+                    ])),
                 PopupMenuItem(value: 'delete', height: 38,
                     child: Row(children: [
                       const Icon(Icons.delete_outline_rounded, size: 14, color: AppColors.error),
@@ -5339,6 +6747,8 @@ class _BillingScreenState extends State<BillingScreen> {
               onSelected: (v) async {
                 if (v == 'edit') {
                   _showEditProductDialog(p);
+                } else if (v == 'barcode') {
+                  _showPrintBarcodeDialog(p);
                 } else if (v == 'delete') {
                   _confirmDeleteProduct(p);
                 }
@@ -5408,6 +6818,499 @@ class _BillingScreenState extends State<BillingScreen> {
 
   // ── Edit / Delete Product ─────────────────────────────────────────────────────
 
+  void _showPrintBarcodeDialog(Product p) {
+    int qty = p.stock > 0 ? p.stock : 1;
+    int labelsPerRow = _barcodePerRow;
+    final labelWCtrl = TextEditingController(text: _barcodeLabelW.toStringAsFixed(_barcodeLabelW == _barcodeLabelW.truncateToDouble() ? 0 : 1));
+    final labelHCtrl = TextEditingController(text: _barcodeLabelH.toStringAsFixed(_barcodeLabelH == _barcodeLabelH.truncateToDouble() ? 0 : 1));
+    final qtyCtrl = TextEditingController(text: '$qty');
+    final perRowCtrl = TextEditingController(text: '$labelsPerRow');
+    List<String> availablePrinters = ['System Default'];
+    String selectedDialogPrinter = _barcodePrinter;
+
+    // helper for clean stepper
+    Widget _stepper({required TextEditingController ctrl, required int val, required VoidCallback onDec, required VoidCallback onInc, required ValueChanged<String> onChange}) =>
+      Container(
+        decoration: BoxDecoration(color: AppColors.surfaceVariant, borderRadius: BorderRadius.circular(10)),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          InkWell(onTap: onDec, borderRadius: const BorderRadius.horizontal(left: Radius.circular(9)),
+            child: Container(width: 34, height: 38, alignment: Alignment.center,
+              child: Icon(Icons.remove_rounded, size: 15, color: val > 1 ? AppColors.textDark : AppColors.textMuted))),
+          Container(width: 1, height: 24, color: AppColors.border),
+          SizedBox(width: 52, height: 38, child: Center(child: TextFormField(
+            controller: ctrl, keyboardType: TextInputType.number, textAlign: TextAlign.center,
+            style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textDark),
+            decoration: const InputDecoration(isDense: true, border: InputBorder.none, contentPadding: EdgeInsets.zero),
+            onChanged: onChange,
+          ))),
+          Container(width: 1, height: 24, color: AppColors.border),
+          InkWell(onTap: onInc, borderRadius: const BorderRadius.horizontal(right: Radius.circular(9)),
+            child: Container(width: 34, height: 38, alignment: Alignment.center,
+              child: const Icon(Icons.add_rounded, size: 15, color: AppColors.textDark))),
+        ]),
+      );
+
+    Widget _field(String label, TextEditingController ctrl) => Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
+        const SizedBox(height: 5),
+        TextFormField(
+          controller: ctrl, keyboardType: TextInputType.number,
+          style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textDark),
+          decoration: InputDecoration(
+            isDense: true,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            filled: true, fillColor: AppColors.surfaceVariant,
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
+            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: AppColors.primary, width: 1.5)),
+          ),
+        ),
+      ],
+    );
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) {
+          // Load printers on first render so saved printer is pre-selected
+          if (availablePrinters.length <= 1) {
+            Process.run('lpstat', ['-p']).then((r) {
+              final list = <String>['System Default'];
+              for (final line in r.stdout.toString().split('\n')) {
+                if (line.startsWith('printer ')) { final n = line.split(' ')[1]; if (n.isNotEmpty) list.add(n); }
+              }
+              if (ctx.mounted) setLocal(() {
+                availablePrinters = list;
+                if (list.contains(_barcodePrinter)) selectedDialogPrinter = _barcodePrinter;
+              });
+            });
+          }
+          return Dialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            elevation: 0,
+            child: Container(
+            width: 360,
+            padding: const EdgeInsets.fromLTRB(24, 20, 24, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Header
+                Row(children: [
+                  Text('Print Barcode', style: GoogleFonts.manrope(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textDark)),
+                  const Spacer(),
+                  InkWell(
+                    onTap: () => Navigator.pop(ctx),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      width: 30, height: 30,
+                      decoration: BoxDecoration(color: AppColors.surfaceVariant, borderRadius: BorderRadius.circular(8)),
+                      child: const Icon(Icons.close_rounded, size: 16, color: AppColors.textMuted),
+                    ),
+                  ),
+                ]),
+                const SizedBox(height: 16),
+                // Barcode preview
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(vertical: 18),
+                  decoration: BoxDecoration(color: const Color(0xFFF7F7F7), borderRadius: BorderRadius.circular(12)),
+                  child: Center(
+                    child: Container(
+                      width: 210,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: Colors.white, borderRadius: BorderRadius.circular(8),
+                        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 12, offset: const Offset(0, 3))],
+                      ),
+                      child: Column(children: [
+                        Text(p.name, maxLines: 1, overflow: TextOverflow.ellipsis,
+                            style: GoogleFonts.inter(fontSize: 9, fontWeight: FontWeight.w600, color: Colors.black87)),
+                        const SizedBox(height: 6),
+                        SizedBox(height: 48, width: double.infinity, child: CustomPaint(painter: _BarcodePainter(p.sku))),
+                        const SizedBox(height: 4),
+                        Text(p.sku, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Colors.black, letterSpacing: 1.5, fontFamily: 'Courier')),
+                        Text('$_currencySymbol${p.price.toStringAsFixed(2)}',
+                            style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w700, color: Colors.black87)),
+                      ]),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                // Quantity + Per Row
+                Row(children: [
+                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('Quantity', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
+                    const SizedBox(height: 5),
+                    _stepper(
+                      ctrl: qtyCtrl, val: qty,
+                      onDec: qty > 1 ? () => setLocal(() { qty--; qtyCtrl.text = '$qty'; }) : () {},
+                      onInc: () => setLocal(() { qty++; qtyCtrl.text = '$qty'; }),
+                      onChange: (v) { final n = int.tryParse(v); if (n != null && n > 0) setLocal(() => qty = n); },
+                    ),
+                  ])),
+                  const SizedBox(width: 12),
+                  Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('Per Row', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
+                    const SizedBox(height: 5),
+                    _stepper(
+                      ctrl: perRowCtrl, val: labelsPerRow,
+                      onDec: labelsPerRow > 1 ? () => setLocal(() { labelsPerRow--; perRowCtrl.text = '$labelsPerRow'; }) : () {},
+                      onInc: () => setLocal(() { labelsPerRow++; perRowCtrl.text = '$labelsPerRow'; }),
+                      onChange: (v) { final n = int.tryParse(v); if (n != null && n >= 1) setLocal(() => labelsPerRow = n); },
+                    ),
+                  ]),
+                ]),
+                const SizedBox(height: 14),
+                // Label size
+                Row(children: [
+                  Expanded(child: _field('Width (mm)', labelWCtrl)),
+                  const SizedBox(width: 10),
+                  Expanded(child: _field('Height (mm)', labelHCtrl)),
+                ]),
+                const SizedBox(height: 14),
+                // Printer — styled like a segmented/filled selector
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Printer', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w500, color: AppColors.textMuted)),
+                  const SizedBox(height: 5),
+                  Container(
+                    width: double.infinity,
+                    decoration: BoxDecoration(
+                      color: AppColors.surfaceVariant,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: AppColors.border, width: 1),
+                    ),
+                    child: DropdownButtonHideUnderline(
+                      child: ButtonTheme(
+                        alignedDropdown: true,
+                        child: DropdownButton<String>(
+                          value: availablePrinters.contains(selectedDialogPrinter) ? selectedDialogPrinter : 'System Default',
+                          isExpanded: true,
+                          items: availablePrinters.map((name) => DropdownMenuItem(
+                            value: name,
+                            child: Row(children: [
+                              Icon(
+                                name == 'System Default' ? Icons.print_outlined : Icons.print_rounded,
+                                size: 14,
+                                color: name == selectedDialogPrinter ? AppColors.primary : AppColors.textMuted,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(child: Text(name,
+                                style: GoogleFonts.inter(fontSize: 13,
+                                  color: name == selectedDialogPrinter ? AppColors.primary : AppColors.textDark,
+                                  fontWeight: name == selectedDialogPrinter ? FontWeight.w600 : FontWeight.w400),
+                                overflow: TextOverflow.ellipsis)),
+                            ]),
+                          )).toList(),
+                          onChanged: (v) => setLocal(() => selectedDialogPrinter = v ?? 'System Default'),
+                          style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
+                          isDense: true,
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                          icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: AppColors.textMuted),
+                          selectedItemBuilder: (ctx) => availablePrinters.map((name) => Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text(name, style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark, fontWeight: FontWeight.w500), overflow: TextOverflow.ellipsis),
+                          )).toList(),
+                        ),
+                      ),
+                    ),
+                  ),
+                ]),
+                const SizedBox(height: 20),
+                // Buttons
+                Row(children: [
+                  Expanded(child: OutlinedButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      side: const BorderSide(color: AppColors.border),
+                      foregroundColor: AppColors.textMuted,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                    child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w500)),
+                  )),
+                  const SizedBox(width: 10),
+                  Expanded(child: ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      final w = double.tryParse(labelWCtrl.text) ?? 58;
+                      final h = double.tryParse(labelHCtrl.text) ?? 30;
+                      final finalQty = int.tryParse(qtyCtrl.text) ?? qty;
+                      final finalPerRow = int.tryParse(perRowCtrl.text) ?? labelsPerRow;
+                      // Persist last-used barcode settings
+                      setState(() {
+                        _barcodeLabelW = w;
+                        _barcodeLabelH = h;
+                        _barcodePerRow = finalPerRow;
+                        _barcodePrinter = selectedDialogPrinter;
+                      });
+                      LocalDbService.saveSettings({
+                        'barcode_label_w': w.toString(),
+                        'barcode_label_h': h.toString(),
+                        'barcode_per_row': finalPerRow.toString(),
+                        'barcode_printer': selectedDialogPrinter,
+                      });
+                      _printBarcode(p, quantity: finalQty, labelW: w, labelH: h, labelsPerRow: finalPerRow, printerName: selectedDialogPrinter);
+                    },
+                    icon: const Icon(Icons.print_rounded, size: 15),
+                    label: Text('Print ${int.tryParse(qtyCtrl.text) ?? qty} Label${(int.tryParse(qtyCtrl.text) ?? qty) > 1 ? 's' : ''}',
+                        style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600)),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.primary,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                  )),
+                ]),
+              ],
+            ),
+          ),
+        );
+        },
+      ),
+    );
+  }
+
+  Future<void> _printBarcode(Product p, {int quantity = 1, double labelW = 58, double labelH = 30, int labelsPerRow = 1, String? printerName}) async {
+    final svgStr = bc.Barcode.code128().toSvg(p.sku, width: 200, height: 60, drawText: false);
+
+    final regularData = await rootBundle.load('assets/fonts/NotoSans-Regular.ttf');
+    final boldData    = await rootBundle.load('assets/fonts/NotoSans-Bold.ttf');
+    final regular = pw.Font.ttf(regularData);
+    final bold    = pw.Font.ttf(boldData);
+
+    final doc = pw.Document();
+    // labelW x labelH = ONE sticker; page = perRow stickers + gaps + side margins
+    const gapMm = 0.5;
+    const marginMm = 2.0;
+    final gap = gapMm * PdfPageFormat.mm;
+    final margin = marginMm * PdfPageFormat.mm;
+    final cellW = labelW * PdfPageFormat.mm;
+    final cellH = labelH * PdfPageFormat.mm;
+    final pageW = margin * 2 + labelsPerRow * cellW + (labelsPerRow - 1) * gap;
+    final pageH = cellH;
+    final pageFormat = PdfPageFormat(pageW, pageH);
+
+    final pad = 5.0 * PdfPageFormat.mm;
+    pw.Widget labelCell() => pw.Container(
+      width: cellW,
+      height: cellH,
+      padding: pw.EdgeInsets.symmetric(horizontal: pad, vertical: 1.5 * PdfPageFormat.mm),
+      child: pw.Column(
+        mainAxisAlignment: pw.MainAxisAlignment.center,
+        children: [
+          pw.SvgImage(svg: svgStr, width: cellW - pad * 2, height: (cellH - 2 * PdfPageFormat.mm) * 0.62),
+          pw.Text(p.sku, style: pw.TextStyle(font: bold, fontSize: 4.5, letterSpacing: 0.4), textAlign: pw.TextAlign.center),
+          pw.Text('$_currencySymbol${p.price.toStringAsFixed(2)}', style: pw.TextStyle(font: bold, fontSize: 4.5), textAlign: pw.TextAlign.center),
+        ],
+      ),
+    );
+
+    int printed = 0;
+    while (printed < quantity) {
+      final n = ((quantity - printed) < labelsPerRow) ? (quantity - printed) : labelsPerRow;
+      doc.addPage(pw.Page(
+        pageFormat: pageFormat,
+        margin: pw.EdgeInsets.symmetric(horizontal: margin),
+        build: (_) {
+          final cells = <pw.Widget>[];
+          for (int i = 0; i < n; i++) {
+            if (i > 0) cells.add(pw.SizedBox(width: gap));
+            cells.add(labelCell());
+          }
+          return pw.Row(children: cells);
+        },
+      ));
+      printed += n;
+    }
+
+    final bytes = await doc.save();
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        child: Container(
+          width: 400,
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(children: [
+                Text('Print Preview',
+                    style: GoogleFonts.manrope(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.textDark)),
+                const Spacer(),
+                IconButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  icon: const Icon(Icons.close_rounded, size: 20),
+                  style: IconButton.styleFrom(foregroundColor: AppColors.textMuted),
+                ),
+              ]),
+              const SizedBox(height: 16),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(10),
+                child: SizedBox(
+                  width: double.infinity,
+                  height: 260,
+                  child: PdfPreview(
+                    build: (_) async => bytes,
+                    canChangePageFormat: false,
+                    canChangeOrientation: false,
+                    canDebug: false,
+                    allowPrinting: false,
+                    allowSharing: false,
+                    scrollViewDecoration: const BoxDecoration(color: Color(0xFFF5F5F5)),
+                    pdfPreviewPageDecoration: BoxDecoration(
+                      color: Colors.white,
+                      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.12), blurRadius: 6, offset: const Offset(0, 2))],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              Row(children: [
+                Expanded(child: OutlinedButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    side: const BorderSide(color: AppColors.border),
+                    foregroundColor: AppColors.textDark,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                  child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w500)),
+                )),
+                const SizedBox(width: 10),
+                Expanded(child: ElevatedButton.icon(
+                  onPressed: () async {
+                    Navigator.pop(ctx);
+                    final tmp = await Directory.systemTemp.createTemp('billcat_barcode_');
+                    final pdfFile = File('${tmp.path}/Barcode-${p.sku}.pdf');
+                    await pdfFile.writeAsBytes(bytes);
+                    // Sheet dimensions: side margins + perRow stickers + gaps
+                    const gapMm = 0.5;
+                    const marginMm = 2.0;
+                    final sheetW = marginMm * 2 + labelsPerRow * labelW + (labelsPerRow - 1) * gapMm;
+                    final sheetH = labelH;
+                    final targetPrinter = (printerName != null && printerName != 'System Default') ? printerName : null;
+                    final wPt = (sheetW / 25.4 * 72).round();
+                    final hPt = (sheetH / 25.4 * 72).round();
+                    if (targetPrinter != null) {
+                      await Process.run('lpr', [
+                        '-P', targetPrinter,
+                        '-o', 'fit-to-page=false',
+                        '-o', 'media=Custom.${wPt}x$hPt',
+                        '-o', 'scaling=100',
+                        pdfFile.path,
+                      ]);
+                    } else {
+                      // No printer selected — open Preview as fallback
+                      await Process.run('osascript', ['-e',
+'tell application "Preview" to activate\n'
+'tell application "Preview" to open POSIX file "${pdfFile.path}"\n'
+'delay 1.5\n'
+'tell application "System Events" to keystroke "p" using command down',
+                      ]);
+                    }
+                    if (mounted) _showToast('Sent to ${targetPrinter ?? 'printer'}');
+                  },
+                  icon: const Icon(Icons.print_rounded, size: 15),
+                  label: Text('Print', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                )),
+              ]),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _registerMacOSPaperSize(double wMm, double hMm) async {
+    final wPt = wMm * 72.0 / 25.4;
+    final hPt = hMm * 72.0 / 25.4;
+    final key = 'BillCat_${wMm.round()}x${hMm.round()}';
+    final displayName = '${wMm.round()} x ${hMm.round()} mm';
+
+    // Clean up wrong entry from previous attempt, then write correct format
+    // macOS custom papers use: id, name, width, height, top/bottom/left/right, custom, printer
+    // Must use `defaults write` so cfprefsd picks it up immediately (PlistBuddy bypasses cache)
+    await Process.run('defaults', ['delete', 'com.apple.print.custompapers', '0']);
+    await Process.run('defaults', ['write', 'com.apple.print.custompapers', key,
+      '{custom = 1; id = "$key"; name = "$displayName"; width = $wPt; height = $hPt; top = 0; bottom = 0; left = 0; right = 0; printer = "";}']);
+  }
+
+  Future<void> _printAllBarcodes(List<Product> products) async {
+    if (products.isEmpty) return;
+
+    final regularData = await rootBundle.load('assets/fonts/NotoSans-Regular.ttf');
+    final boldData    = await rootBundle.load('assets/fonts/NotoSans-Bold.ttf');
+    final regular = pw.Font.ttf(regularData);
+    final bold    = pw.Font.ttf(boldData);
+
+    final doc = pw.Document();
+    final lw = 58 * PdfPageFormat.mm;
+    final lh = 30 * PdfPageFormat.mm;
+    // Use A4 so printer receives standard paper size
+    const pageFormat = PdfPageFormat.a4;
+    const pageMargin = 8.0 * PdfPageFormat.mm;
+    final cols = ((pageFormat.width - pageMargin * 2) / lw).floor().clamp(1, 999);
+    final rowsPerPage = ((pageFormat.height - pageMargin * 2) / lh).floor().clamp(1, 999);
+
+    final allLabels = <pw.Widget>[];
+    for (final p in products) {
+      final svgStr = bc.Barcode.code128().toSvg(p.sku, width: 200, height: 80, drawText: false);
+      allLabels.add(pw.Container(
+        width: lw, height: lh,
+        padding: pw.EdgeInsets.symmetric(horizontal: 5 * PdfPageFormat.mm, vertical: 1.5 * PdfPageFormat.mm),
+        child: pw.Column(mainAxisAlignment: pw.MainAxisAlignment.center, children: [
+          pw.SvgImage(svg: svgStr, width: lw - 10 * PdfPageFormat.mm, height: 17 * PdfPageFormat.mm),
+          pw.SizedBox(height: 1 * PdfPageFormat.mm),
+          pw.Text(p.sku, style: pw.TextStyle(font: bold, fontSize: 7), textAlign: pw.TextAlign.center),
+          pw.Text(p.name, maxLines: 1, style: pw.TextStyle(font: regular, fontSize: 6), textAlign: pw.TextAlign.center),
+          pw.Text('$_currencySymbol${p.price.toStringAsFixed(2)}', style: pw.TextStyle(font: bold, fontSize: 7), textAlign: pw.TextAlign.center),
+        ]),
+      ));
+    }
+
+    final labelsPerPage = cols * rowsPerPage;
+    for (int start = 0; start < allLabels.length; start += labelsPerPage) {
+      final chunk = allLabels.sublist(start, (start + labelsPerPage).clamp(0, allLabels.length));
+      doc.addPage(pw.Page(
+        pageFormat: pageFormat,
+        margin: const pw.EdgeInsets.all(pageMargin),
+        build: (_) {
+          final rows = <pw.Widget>[];
+          for (int r = 0; r * cols < chunk.length; r++) {
+            final rowCells = chunk.skip(r * cols).take(cols).toList();
+            rows.add(pw.Row(children: rowCells));
+          }
+          return pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: rows);
+        },
+      ));
+    }
+
+    final bytes = await doc.save();
+    final tmp = await Directory.systemTemp.createTemp('billcat_barcodes_');
+    final pdfFile = File('${tmp.path}/Barcodes.pdf');
+    await pdfFile.writeAsBytes(bytes);
+    await Process.run('osascript', ['-e',
+  'tell application "Preview" to activate\n'
+  'tell application "Preview" to open POSIX file "${pdfFile.path}"\n'
+  'delay 1\n'
+  'tell application "System Events" to keystroke "p" using command down',
+]);
+  }
+
   void _confirmDeleteProduct(Product p) {
     showDialog(
       context: context,
@@ -5446,6 +7349,7 @@ class _BillingScreenState extends State<BillingScreen> {
     final buyingPriceCtrl = TextEditingController(text: p.buyingPrice > 0 ? p.buyingPrice.toStringAsFixed(2) : '');
     final taxPercentCtrl = TextEditingController(text: p.taxPercent > 0 ? p.taxPercent.toStringAsFixed(2) : '');
     final stockCtrl = TextEditingController(text: '${p.stock}');
+    final descriptionCtrl = TextEditingController(text: p.description);
     String emoji = p.emoji;
     String category = _userCategories.contains(p.category) ? p.category : (_userCategories..add(p.category)).last;
 
@@ -5635,6 +7539,16 @@ class _BillingScreenState extends State<BillingScreen> {
                           ),
                         ])),
                       ]),
+                      const SizedBox(height: 16),
+                      _dlgLabel('DESCRIPTION'),
+                      const SizedBox(height: 6),
+                      TextFormField(
+                        controller: descriptionCtrl,
+                        maxLines: 3,
+                        minLines: 2,
+                        style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
+                        decoration: _dlgInputDecor('Optional product details, notes, specs…'),
+                      ),
                     ]),
                   ),
                 ),
@@ -5659,6 +7573,7 @@ class _BillingScreenState extends State<BillingScreen> {
                           emoji: emoji,
                           sku: skuCtrl.text.trim().isEmpty ? p.sku : skuCtrl.text.trim(),
                           stock: int.parse(stockCtrl.text),
+                          description: descriptionCtrl.text.trim(),
                         );
                         await LocalDbService.updateProduct(updated);
                         ConnectivityService.instance.syncNow();
@@ -5689,6 +7604,29 @@ class _BillingScreenState extends State<BillingScreen> {
 
   // ── Add Product Dialog ────────────────────────────────────────────────────────
 
+  String _generateUniqueSku(String name, {String? excludeId}) {
+    final words = name.trim().split(RegExp(r'\s+'));
+    String prefix = '';
+    for (final w in words) {
+      final clean = w.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toUpperCase();
+      if (clean.isNotEmpty) {
+        prefix += clean.length > 2 ? clean.substring(0, 2) : clean;
+      }
+      if (prefix.length >= 4) break;
+    }
+    if (prefix.isEmpty) prefix = 'ITEM';
+    prefix = prefix.substring(0, prefix.length.clamp(2, 6));
+    final existing = _products
+        .where((p) => excludeId == null || p.id != excludeId)
+        .map((p) => p.sku)
+        .toSet();
+    int num = 1;
+    while (existing.contains('$prefix${num.toString().padLeft(2, '0')}')) {
+      num++;
+    }
+    return '$prefix${num.toString().padLeft(2, '0')}';
+  }
+
   void _showAddProductDialog() {
     final formKey = GlobalKey<FormState>();
     final nameCtrl = TextEditingController();
@@ -5697,8 +7635,21 @@ class _BillingScreenState extends State<BillingScreen> {
     final buyingPriceCtrl = TextEditingController();
     final taxPercentCtrl = TextEditingController();
     final stockCtrl = TextEditingController();
+    final descriptionCtrl = TextEditingController();
     String emoji = '';
     String category = _userCategories.isNotEmpty ? _userCategories.first : '';
+    bool skuAutoMode = true;
+
+    nameCtrl.addListener(() {
+      if (skuAutoMode && nameCtrl.text.isNotEmpty) {
+        skuCtrl.text = _generateUniqueSku(nameCtrl.text);
+      }
+    });
+    skuCtrl.addListener(() {
+      // If user manually edits SKU, stop auto-generating
+      final expected = nameCtrl.text.isNotEmpty ? _generateUniqueSku(nameCtrl.text) : '';
+      if (skuCtrl.text != expected) skuAutoMode = false;
+    });
 
     showDialog(
       context: context,
@@ -6005,6 +7956,16 @@ class _BillingScreenState extends State<BillingScreen> {
                             ),
                           ],
                         ),
+                        const SizedBox(height: 16),
+                        _dlgLabel('DESCRIPTION'),
+                        const SizedBox(height: 6),
+                        TextFormField(
+                          controller: descriptionCtrl,
+                          maxLines: 3,
+                          minLines: 2,
+                          style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
+                          decoration: _dlgInputDecor('Optional product details, notes, specs…'),
+                        ),
                       ],
                     ),
                   ),
@@ -6032,8 +7993,12 @@ class _BillingScreenState extends State<BillingScreen> {
                         onPressed: () async {
                           if (!formKey.currentState!.validate()) return;
                           final sku = skuCtrl.text.trim().isEmpty
-                              ? '${nameCtrl.text.trim().substring(0, nameCtrl.text.trim().length.clamp(0, 3)).toUpperCase()}-${DateTime.now().millisecondsSinceEpoch % 100000}'
-                              : skuCtrl.text.trim();
+                              ? _generateUniqueSku(nameCtrl.text.trim())
+                              : skuCtrl.text.trim().toUpperCase();
+                          if (_products.any((p) => p.sku == sku)) {
+                            _showToast('SKU "$sku" already exists', isError: true);
+                            return;
+                          }
                           final newProduct = Product(
                             id: DateTime.now()
                                 .millisecondsSinceEpoch
@@ -6046,6 +8011,7 @@ class _BillingScreenState extends State<BillingScreen> {
                             emoji: emoji,
                             sku: sku,
                             stock: int.parse(stockCtrl.text),
+                            description: descriptionCtrl.text.trim(),
                           );
                           await LocalDbService.insertProduct(newProduct);
                           ConnectivityService.instance.syncNow();
@@ -6630,6 +8596,188 @@ class _BillingScreenState extends State<BillingScreen> {
     );
   }
 
+  Widget _printIconBtn(VoidCallback onTap) => GestureDetector(
+    onTap: onTap,
+    child: Container(
+      width: 36, height: 36,
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E293B),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: const Icon(Icons.print_rounded, color: Colors.white, size: 16),
+    ),
+  );
+
+  Future<void> _printSalesTable(List<TransactionRecord> txList, String periodLabel) async {
+    if (txList.isEmpty) return;
+    final regularData = await rootBundle.load('assets/fonts/NotoSans-Regular.ttf');
+    final boldData    = await rootBundle.load('assets/fonts/NotoSans-Bold.ttf');
+    final regular = pw.Font.ttf(regularData);
+    final bold    = pw.Font.ttf(boldData);
+
+    final q = _salesSearchQuery.toLowerCase();
+    final rows = txList.where((t) {
+      if (q.isEmpty) return true;
+      return (t.customerName ?? '').toLowerCase().contains(q) ||
+          t.items.any((i) => i.productName.toLowerCase().contains(q));
+    }).toList();
+
+    final doc = pw.Document();
+    doc.addPage(pw.MultiPage(
+      pageFormat: PdfPageFormat.a4,
+      margin: const pw.EdgeInsets.all(32),
+      build: (ctx) => [
+        pw.Text('Transaction History – $periodLabel',
+            style: pw.TextStyle(font: bold, fontSize: 16)),
+        pw.SizedBox(height: 12),
+        pw.Table(
+          border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
+          columnWidths: {
+            0: const pw.FlexColumnWidth(2),
+            1: const pw.FlexColumnWidth(2),
+            2: const pw.FlexColumnWidth(3),
+            3: const pw.FlexColumnWidth(2),
+            4: const pw.FlexColumnWidth(2),
+          },
+          children: [
+            pw.TableRow(
+              decoration: const pw.BoxDecoration(color: PdfColors.grey200),
+              children: ['DATE', 'INVOICE', 'CUSTOMER', 'PAYMENT', 'TOTAL']
+                  .map((h) => pw.Padding(
+                        padding: const pw.EdgeInsets.all(6),
+                        child: pw.Text(h, style: pw.TextStyle(font: bold, fontSize: 8)),
+                      ))
+                  .toList(),
+            ),
+            ...rows.map((t) => pw.TableRow(children: [
+              _pdfCell(t.createdAt.toString().substring(0, 16), regular),
+              _pdfCell('#${t.invoiceNumber ?? t.id.substring(0, 6).toUpperCase()}', regular),
+              _pdfCell(t.customerName ?? '—', regular),
+              _pdfCell(t.paymentMethod, regular),
+              _pdfCell('$_currencySymbol${t.total.toStringAsFixed(2)}', bold),
+            ])),
+          ],
+        ),
+      ],
+    ));
+    final bytes = await doc.save();
+    await Printing.layoutPdf(onLayout: (_) => bytes, name: 'Sales-$periodLabel');
+  }
+
+  Future<void> _printCustomersTable(List<Customer> customers) async {
+    if (customers.isEmpty) return;
+    final regularData = await rootBundle.load('assets/fonts/NotoSans-Regular.ttf');
+    final boldData    = await rootBundle.load('assets/fonts/NotoSans-Bold.ttf');
+    final regular = pw.Font.ttf(regularData);
+    final bold    = pw.Font.ttf(boldData);
+
+    final q = _customerSearchQuery.toLowerCase();
+    final rows = customers.where((c) =>
+        q.isEmpty ||
+        c.name.toLowerCase().contains(q) ||
+        (c.phone ?? '').contains(q)).toList();
+
+    final doc = pw.Document();
+    doc.addPage(pw.MultiPage(
+      pageFormat: PdfPageFormat.a4,
+      margin: const pw.EdgeInsets.all(32),
+      build: (ctx) => [
+        pw.Text('Customer List',
+            style: pw.TextStyle(font: bold, fontSize: 16)),
+        pw.SizedBox(height: 12),
+        pw.Table(
+          border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
+          columnWidths: {
+            0: const pw.FixedColumnWidth(30),
+            1: const pw.FlexColumnWidth(4),
+            2: const pw.FlexColumnWidth(3),
+            3: const pw.FlexColumnWidth(3),
+          },
+          children: [
+            pw.TableRow(
+              decoration: const pw.BoxDecoration(color: PdfColors.grey200),
+              children: ['#', 'NAME', 'PHONE', 'ADDED ON']
+                  .map((h) => pw.Padding(
+                        padding: const pw.EdgeInsets.all(6),
+                        child: pw.Text(h, style: pw.TextStyle(font: bold, fontSize: 8)),
+                      ))
+                  .toList(),
+            ),
+            ...rows.asMap().entries.map((e) => pw.TableRow(children: [
+              _pdfCell('${e.key + 1}', regular),
+              _pdfCell(e.value.name, regular),
+              _pdfCell(e.value.phone ?? '—', regular),
+              _pdfCell(e.value.createdAt.toString().substring(0, 10), regular),
+            ])),
+          ],
+        ),
+      ],
+    ));
+    final bytes = await doc.save();
+    await Printing.layoutPdf(onLayout: (_) => bytes, name: 'Customers');
+  }
+
+  Future<void> _printInventoryTable(List<Product> products) async {
+    if (products.isEmpty) return;
+    final regularData = await rootBundle.load('assets/fonts/NotoSans-Regular.ttf');
+    final boldData    = await rootBundle.load('assets/fonts/NotoSans-Bold.ttf');
+    final regular = pw.Font.ttf(regularData);
+    final bold    = pw.Font.ttf(boldData);
+
+    final doc = pw.Document();
+    doc.addPage(pw.MultiPage(
+      pageFormat: PdfPageFormat.a4,
+      margin: const pw.EdgeInsets.all(32),
+      build: (ctx) => [
+        pw.Text('Product Inventory',
+            style: pw.TextStyle(font: bold, fontSize: 16)),
+        pw.SizedBox(height: 12),
+        pw.Table(
+          border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
+          columnWidths: {
+            0: const pw.FixedColumnWidth(24),
+            1: const pw.FlexColumnWidth(4),
+            2: const pw.FlexColumnWidth(2),
+            3: const pw.FlexColumnWidth(2),
+            4: const pw.FlexColumnWidth(2),
+            5: const pw.FlexColumnWidth(1),
+            6: const pw.FlexColumnWidth(2),
+          },
+          children: [
+            pw.TableRow(
+              decoration: const pw.BoxDecoration(color: PdfColors.grey200),
+              children: ['#', 'PRODUCT', 'CATEGORY', 'SKU', 'PRICE', 'STOCK', 'VALUE']
+                  .map((h) => pw.Padding(
+                        padding: const pw.EdgeInsets.all(6),
+                        child: pw.Text(h, style: pw.TextStyle(font: bold, fontSize: 8)),
+                      ))
+                  .toList(),
+            ),
+            ...products.asMap().entries.map((e) {
+              final p = e.value;
+              return pw.TableRow(children: [
+                _pdfCell('${e.key + 1}', regular),
+                _pdfCell(p.name, regular),
+                _pdfCell(p.category, regular),
+                _pdfCell(p.sku, regular),
+                _pdfCell('$_currencySymbol${p.price.toStringAsFixed(2)}', regular),
+                _pdfCell('${p.stock}', regular),
+                _pdfCell('$_currencySymbol${(p.price * p.stock).toStringAsFixed(2)}', bold),
+              ]);
+            }),
+          ],
+        ),
+      ],
+    ));
+    final bytes = await doc.save();
+    await Printing.layoutPdf(onLayout: (_) => bytes, name: 'Inventory');
+  }
+
+  pw.Widget _pdfCell(String text, pw.Font font) => pw.Padding(
+    padding: const pw.EdgeInsets.all(5),
+    child: pw.Text(text, style: pw.TextStyle(font: font, fontSize: 9)),
+  );
+
   Widget _dashColHeader(String text, {bool right = false}) => Text(text,
       textAlign: right ? TextAlign.right : TextAlign.left,
       style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: AppColors.textMuted, letterSpacing: 0.8));
@@ -6651,6 +8799,53 @@ class _BillingScreenState extends State<BillingScreen> {
   String _fmtDate(DateTime d) {
     const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     return '${months[d.month - 1]} ${d.day}, ${d.year}';
+  }
+
+  // ── Utilities View ────────────────────────────────────────────────────────────
+
+  Widget _buildUtilitiesView() {
+    return Padding(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(_utilitiesView, style: GoogleFonts.manrope(
+              fontSize: 22, fontWeight: FontWeight.w700, color: AppColors.textDark)),
+          const SizedBox(height: 4),
+          Text('May ${DateTime.now().day}, ${DateTime.now().year}',
+              style: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted)),
+          const SizedBox(height: 24),
+          if (_utilitiesView == 'Delivery') _buildDeliveryView(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDeliveryView() {
+    return Expanded(
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              width: 72, height: 72,
+              decoration: BoxDecoration(
+                color: AppColors.accentBlue.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: const Icon(Icons.local_shipping_outlined,
+                  size: 36, color: AppColors.accentBlue),
+            ),
+            const SizedBox(height: 16),
+            Text('Delivery', style: GoogleFonts.manrope(
+                fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.textDark)),
+            const SizedBox(height: 8),
+            Text('Delivery management coming soon.',
+                style: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted)),
+          ],
+        ),
+      ),
+    );
   }
 
   // ── Reports View ─────────────────────────────────────────────────────────────
@@ -6786,6 +8981,8 @@ class _BillingScreenState extends State<BillingScreen> {
                     ]),
                   ),
                 ),
+                const SizedBox(width: 8),
+                _printIconBtn(() => _printSalesTable(txList, periodLabel)),
               ]),
               const SizedBox(height: 16),
               if (txList.isEmpty)
@@ -7209,7 +9406,7 @@ class _BillingScreenState extends State<BillingScreen> {
   void _lockOwnerMode() {
     setState(() {
       _isOwnerMode = false;
-      if (_selectedTab == 0 || _selectedTab == 3) _selectedTab = 1;
+      if (_selectedTab == 0 || _selectedTab == 3 || _selectedTab == 4) _selectedTab = 1;
     });
   }
 
@@ -7463,6 +9660,8 @@ class _BillingScreenState extends State<BillingScreen> {
                     ]),
                   ),
                 ),
+                const SizedBox(width: 8),
+                _printIconBtn(() => _printCustomersTable(_reportCustomers)),
               ]),
               const SizedBox(height: 16),
               Padding(
@@ -7563,8 +9762,13 @@ class _BillingScreenState extends State<BillingScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Product Inventory', style: GoogleFonts.manrope(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textDark)),
-              Text('${_products.length} items', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w300, color: AppColors.textMuted)),
+              Row(children: [
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Product Inventory', style: GoogleFonts.manrope(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textDark)),
+                  Text('${_products.length} items', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w300, color: AppColors.textMuted)),
+                ])),
+                _printIconBtn(() => _printInventoryTable(_products)),
+              ]),
               const SizedBox(height: 16),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
@@ -7607,8 +9811,8 @@ class _BillingScreenState extends State<BillingScreen> {
                               width: 22, height: 22,
                               child: p.emoji.startsWith('/')
                                   ? Image.file(File(p.emoji), fit: BoxFit.cover,
-                                      errorBuilder: (_, __, ___) => const Text('📦', style: TextStyle(fontSize: 16)))
-                                  : Center(child: Text(p.emoji.isEmpty ? '📦' : p.emoji, style: const TextStyle(fontSize: 16))),
+                                      errorBuilder: (_, __, ___) => _SmallInitialsBox(name: p.name))
+                                  : _SmallInitialsBox(name: p.name),
                             ),
                           ),
                           const SizedBox(width: 6),
@@ -7691,6 +9895,271 @@ class _BillingScreenState extends State<BillingScreen> {
 
 // ── Product Card ─────────────────────────────────────────────────────────────
 
+String _productInitials(String name) {
+  final words = name.trim().split(RegExp(r'\s+'));
+  if (words.isEmpty) return '?';
+  if (words.length == 1) return words[0].substring(0, words[0].length.clamp(1, 2)).toUpperCase();
+  return '${words[0][0]}${words[1][0]}'.toUpperCase();
+}
+
+Color _initialsColor(String name) => const Color(0xFFF1F5F9);
+
+Color _initialsFgColor(Color bg) => const Color(0xFF1E293B);
+
+// Hover shadow wrapper for search bar
+class _HoverShadowBox extends StatefulWidget {
+  final Widget child;
+  final double borderRadius;
+  const _HoverShadowBox({required this.child, this.borderRadius = 14});
+  @override
+  State<_HoverShadowBox> createState() => _HoverShadowBoxState();
+}
+class _HoverShadowBoxState extends State<_HoverShadowBox> {
+  bool _hovered = false;
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(widget.borderRadius),
+          boxShadow: _hovered
+              ? [BoxShadow(color: AppColors.primary.withValues(alpha: 0.12), blurRadius: 16, spreadRadius: 0, offset: const Offset(0, 4))]
+              : [],
+        ),
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+// Hover-aware nav tab
+class _NavHoverTab extends StatefulWidget {
+  final bool selected;
+  final VoidCallback onTap;
+  final String label;
+  const _NavHoverTab({required this.selected, required this.onTap, required this.label});
+  @override
+  State<_NavHoverTab> createState() => _NavHoverTabState();
+}
+class _NavHoverTabState extends State<_NavHoverTab> {
+  bool _hovered = false;
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOut,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: BoxDecoration(
+            color: widget.selected
+                ? AppColors.accentBlue.withValues(alpha: 0.1)
+                : _hovered
+                    ? Colors.black.withValues(alpha: 0.05)
+                    : Colors.transparent,
+            borderRadius: BorderRadius.circular(100),
+          ),
+          child: Text(widget.label,
+              style: GoogleFonts.inter(
+                fontSize: 13,
+                fontWeight: widget.selected ? FontWeight.w700 : FontWeight.w500,
+                color: widget.selected
+                    ? AppColors.accentBlue
+                    : _hovered
+                        ? AppColors.textDark
+                        : AppColors.textMuted.withValues(alpha: 0.7),
+              )),
+        ),
+      ),
+    );
+  }
+}
+
+// Hover-aware category chip
+class _CategoryChip extends StatefulWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  const _CategoryChip({required this.label, required this.selected, required this.onTap});
+  @override
+  State<_CategoryChip> createState() => _CategoryChipState();
+}
+class _CategoryChipState extends State<_CategoryChip> {
+  bool _hovered = false;
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOut,
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 9),
+          decoration: BoxDecoration(
+            color: widget.selected
+                ? AppColors.primary
+                : _hovered
+                    ? const Color(0xFFEEF2FF)
+                    : Colors.white,
+            borderRadius: BorderRadius.circular(100),
+            border: Border.all(
+              color: widget.selected ? AppColors.primary : AppColors.border,
+            ),
+          ),
+          child: Text(widget.label.toUpperCase(),
+              style: GoogleFonts.inter(
+                fontSize: 11,
+                fontWeight: widget.selected ? FontWeight.w700 : FontWeight.w500,
+                letterSpacing: 0.8,
+                color: widget.selected
+                    ? Colors.white
+                    : _hovered
+                        ? AppColors.textDark
+                        : AppColors.textMuted,
+              )),
+        ),
+      ),
+    );
+  }
+}
+
+// Hover-aware dropdown nav tab (Reports / Utilities)
+class _DropdownNavHover extends StatefulWidget {
+  final bool selected;
+  final String label;
+  const _DropdownNavHover({required this.selected, required this.label});
+  @override
+  State<_DropdownNavHover> createState() => _DropdownNavHoverState();
+}
+class _DropdownNavHoverState extends State<_DropdownNavHover> {
+  bool _hovered = false;
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          color: widget.selected
+              ? AppColors.accentBlue.withValues(alpha: 0.1)
+              : _hovered
+                  ? Colors.black.withValues(alpha: 0.05)
+                  : Colors.transparent,
+          borderRadius: BorderRadius.circular(100),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Text(widget.label,
+              style: GoogleFonts.inter(
+                fontSize: 13,
+                fontWeight: widget.selected ? FontWeight.w700 : FontWeight.w500,
+                color: widget.selected
+                    ? AppColors.accentBlue
+                    : _hovered
+                        ? AppColors.textDark
+                        : AppColors.textMuted.withValues(alpha: 0.7),
+              )),
+          const SizedBox(width: 4),
+          Icon(Icons.keyboard_arrow_down_rounded,
+              size: 14,
+              color: widget.selected
+                  ? AppColors.accentBlue
+                  : _hovered
+                      ? AppColors.textDark
+                      : AppColors.textMuted.withValues(alpha: 0.7)),
+        ]),
+      ),
+    );
+  }
+}
+
+class _ProductInitialsBox extends StatelessWidget {
+  final String name;
+  final double radius;
+  const _ProductInitialsBox({required this.name, this.radius = 15});
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = _initialsColor(name);
+    final fg = _initialsFgColor(bg);
+    return Container(
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(radius)),
+        border: const Border(bottom: BorderSide(color: AppColors.border)),
+      ),
+      child: Center(
+        child: Text(
+          name.trim().isNotEmpty ? name.trim()[0].toUpperCase() : '?',
+          style: GoogleFonts.inter(
+            fontSize: 52,
+            fontWeight: FontWeight.w700,
+            color: const Color(0xFF1E293B).withValues(alpha: 0.12),
+            height: 1,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// Small (22×22) initials used in inventory list rows.
+class _SmallInitialsBox extends StatelessWidget {
+  final String name;
+  const _SmallInitialsBox({required this.name});
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = _initialsColor(name);
+    final fg = _initialsFgColor(bg);
+    return Container(
+      color: bg,
+      child: Center(
+        child: Text(
+          _productInitials(name),
+          style: GoogleFonts.inter(fontSize: 9, fontWeight: FontWeight.w700, color: fg),
+        ),
+      ),
+    );
+  }
+}
+
+// Medium (44×44) initials used in the product management grid.
+class _MediumInitialsBox extends StatelessWidget {
+  final String name;
+  final double radius;
+  const _MediumInitialsBox({required this.name, this.radius = 10});
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = _initialsColor(name);
+    final fg = _initialsFgColor(bg);
+    return Container(
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(radius),
+      ),
+      child: Center(
+        child: Text(
+          _productInitials(name),
+          style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w700, color: fg),
+        ),
+      ),
+    );
+  }
+}
+
 class _ProductCard extends StatefulWidget {
   final Product product;
   final VoidCallback onTap;
@@ -7751,18 +10220,8 @@ class _ProductCardState extends State<_ProductCard> {
                                   width: double.infinity,
                                   height: double.infinity,
                                   fit: BoxFit.cover,
-                                  errorBuilder: (_, __, ___) => Container(
-                                    color: AppColors.surfaceVariant,
-                                    child: const Center(child: Text('📦', style: TextStyle(fontSize: 52))))))
-                          : Container(
-                              decoration: BoxDecoration(
-                                color: AppColors.surfaceVariant,
-                                borderRadius: const BorderRadius.vertical(top: Radius.circular(15)),
-                                border: const Border(bottom: BorderSide(color: AppColors.border)),
-                              ),
-                              child: Center(child: Text(
-                                  widget.product.emoji.isEmpty ? '📦' : widget.product.emoji,
-                                  style: const TextStyle(fontSize: 52)))),
+                                  errorBuilder: (_, __, ___) => _ProductInitialsBox(name: widget.product.name, radius: 15)))
+                          : _ProductInitialsBox(name: widget.product.name, radius: 15),
                     ),
                     Consumer<CartProvider>(
                       builder: (_, cart, __) {
@@ -7862,70 +10321,108 @@ class _ProductCardState extends State<_ProductCard> {
 
 // ── Cart Row ─────────────────────────────────────────────────────────────────
 
-class _CartRow extends StatelessWidget {
+class _CartRow extends StatefulWidget {
   final CartItem item;
   final CartProvider cart;
   final String currencySymbol;
   const _CartRow({required this.item, required this.cart, required this.currencySymbol});
+  @override
+  State<_CartRow> createState() => _CartRowState();
+}
+
+class _CartRowState extends State<_CartRow> {
+  bool _editing = false;
+  late TextEditingController _qtyCtrl;
+  final _qtyFocus = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    _qtyCtrl = TextEditingController(text: '${widget.item.quantity}');
+    _qtyFocus.addListener(() {
+      if (!_qtyFocus.hasFocus && _editing) _commitEdit();
+    });
+  }
+
+  @override
+  void dispose() {
+    _qtyCtrl.dispose();
+    _qtyFocus.dispose();
+    super.dispose();
+  }
+
+  void _commitEdit() {
+    final v = int.tryParse(_qtyCtrl.text.trim()) ?? 0;
+    if (v > 0) {
+      widget.cart.setQuantity(widget.item.product.id, v, stock: widget.item.product.stock);
+    } else {
+      widget.cart.removeItem(widget.item.product.id);
+    }
+    if (mounted) setState(() => _editing = false);
+  }
 
   @override
   Widget build(BuildContext context) {
+    if (!_editing) _qtyCtrl.text = '${widget.item.quantity}';
     return Padding(
-      padding: const EdgeInsets.symmetric(
-          horizontal: 20, vertical: 18),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
       child: Row(
         children: [
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(item.product.name,
+                Text(widget.item.product.name,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: GoogleFonts.inter(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.primary)),
+                    style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.primary)),
                 const SizedBox(height: 2),
-                Text(
-                    'SKU: ${item.product.sku}'
-                        .toUpperCase(),
-                    style: GoogleFonts.inter(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w300,
-                        color: AppColors.textMuted
-                            .withValues(alpha: 0.6),
-                        letterSpacing: 0.5)),
+                Text('SKU: ${widget.item.product.sku}'.toUpperCase(),
+                    style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w300,
+                        color: AppColors.textMuted.withValues(alpha: 0.6), letterSpacing: 0.5)),
               ],
             ),
           ),
-          // Qty controls in surface-variant container
+          // Qty controls
           Container(
             width: 90,
             padding: const EdgeInsets.all(3),
             decoration: BoxDecoration(
               color: AppColors.surfaceVariant,
               borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: AppColors.border),
+              border: Border.all(color: _editing ? AppColors.primary : AppColors.border),
             ),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                _qtyBtn(
-                    Icons.remove,
-                    () => cart.decrement(item.product.id)),
-                SizedBox(
-                  width: 32,
-                  child: Text('${item.quantity}',
-                      textAlign: TextAlign.center,
-                      style: GoogleFonts.inter(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                          color: AppColors.primary)),
+                _qtyBtn(Icons.remove, () => widget.cart.decrement(widget.item.product.id)),
+                GestureDetector(
+                  onTap: () {
+                    setState(() => _editing = true);
+                    _qtyCtrl.text = '${widget.item.quantity}';
+                    _qtyCtrl.selection = TextSelection(baseOffset: 0, extentOffset: _qtyCtrl.text.length);
+                    Future.microtask(() => _qtyFocus.requestFocus());
+                  },
+                  child: SizedBox(
+                    width: 32,
+                    child: _editing
+                        ? TextField(
+                            controller: _qtyCtrl,
+                            focusNode: _qtyFocus,
+                            keyboardType: TextInputType.number,
+                            textAlign: TextAlign.center,
+                            textInputAction: TextInputAction.done,
+                            onSubmitted: (_) => _commitEdit(),
+                            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                            style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.primary),
+                            decoration: const InputDecoration(border: InputBorder.none, isDense: true, contentPadding: EdgeInsets.zero),
+                          )
+                        : Text('${widget.item.quantity}',
+                            textAlign: TextAlign.center,
+                            style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.primary)),
+                  ),
                 ),
-                _qtyBtn(
-                    Icons.add,
-                    () => cart.increment(item.product.id, stock: item.product.stock)),
+                _qtyBtn(Icons.add, () => widget.cart.increment(widget.item.product.id, stock: widget.item.product.stock)),
               ],
             ),
           ),
@@ -7935,29 +10432,17 @@ class _CartRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Text(
-                    '$currencySymbol${item.total.toStringAsFixed(2)}',
-                    style: GoogleFonts.inter(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.primary)),
-                Text(
-                    '$currencySymbol${item.product.price.toStringAsFixed(2)}/unit',
-                    style: GoogleFonts.inter(
-                        fontSize: 9,
-                        color: AppColors.textMuted
-                            .withValues(alpha: 0.6),
-                        fontWeight: FontWeight.w300)),
+                Text('${widget.currencySymbol}${widget.item.total.toStringAsFixed(2)}',
+                    style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.primary)),
+                Text('${widget.currencySymbol}${widget.item.product.price.toStringAsFixed(2)}/unit',
+                    style: GoogleFonts.inter(fontSize: 9, color: AppColors.textMuted.withValues(alpha: 0.6), fontWeight: FontWeight.w300)),
               ],
             ),
           ),
           const SizedBox(width: 8),
           GestureDetector(
-            onTap: () => cart.removeItem(item.product.id),
-            child: Icon(Icons.close_rounded,
-                size: 18,
-                color: AppColors.textMuted
-                    .withValues(alpha: 0.5)),
+            onTap: () => widget.cart.removeItem(widget.item.product.id),
+            child: Icon(Icons.close_rounded, size: 18, color: AppColors.textMuted.withValues(alpha: 0.5)),
           ),
         ],
       ),
@@ -7970,10 +10455,7 @@ class _CartRow extends StatelessWidget {
       child: Container(
         width: 24,
         height: 24,
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(6),
-        ),
+        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(6)),
         child: Icon(icon, size: 14, color: AppColors.primary),
       ),
     );
@@ -8389,3 +10871,24 @@ class _InventoryCatChipState extends State<_InventoryCatChip> {
   }
 }
 
+
+
+class _BarcodePainter extends CustomPainter {
+  final String data;
+  _BarcodePainter(this.data);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final barcode = bc.Barcode.code128();
+    final elements = barcode.make(data, width: size.width, height: size.height, drawText: false);
+    final paint = Paint()..color = Colors.black;
+    for (final el in elements) {
+      if (el is bc.BarcodeBar && el.black) {
+        canvas.drawRect(Rect.fromLTWH(el.left, el.top, el.width, el.height), paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_BarcodePainter old) => old.data != data;
+}

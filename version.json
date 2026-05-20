@@ -1,6 +1,7 @@
 {
-  "version": "1.0.0-beta",
-  "download_url": "https://github.com/billcatapp/billcat/releases/download/v1.0.0-beta/BillCat-1.0.0-beta.zip",
-  "release_notes": "5 invoice templates (Classic, Simple, Modern, GST, Landscape), cleaner settings UI, instant layout preview, currency moved to General",
+  "version": "1.4.7",
+  "download_url": "https://github.com/billcatapp/billcat/releases/download/v1.4.7/BillCat-1.4.7.zip",
+  "dmg_url": "https://github.com/billcatapp/billcat/releases/download/v1.4.7/BillCat-1.4.7.dmg",
+  "release_notes": "WhatsApp invoice links, BillCat ID in settings, improved barcode label printing",
   "mandatory": false
 }
