@@ -5619,7 +5619,7 @@ class _BillingScreenState extends State<BillingScreen> {
     final invoiceNo = tx.invoiceNumber ?? tx.id.substring(0, 6).toUpperCase();
     final rawUid = Supabase.instance.client.auth.currentUser?.id ?? 'unknown';
     final shortUid = rawUid.replaceAll('-', '').substring(0, rawUid.length >= 6 ? 6 : rawUid.length).toUpperCase();
-    final invoiceLink = 'https://billcat.in/invoice/$shortUid/$_branchNumber/Bill-$invoiceNo';
+    final invoiceLink = 'https://billcat.in/invoices/$shortUid/$_branchNumber/Bill-$invoiceNo';
 
     // If Meta API is configured, send directly
     if (_waPhoneNumberId.isNotEmpty && _waAccessToken.isNotEmpty) {
