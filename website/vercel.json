@@ -5,6 +5,10 @@
       "destination": "/api/invoice-view?uid=:uid&branch=:branch&billNo=:billNo"
     },
     {
+      "source": "/invoice/:uid/:branch/:billNo",
+      "destination": "/api/invoice-view?uid=:uid&branch=:branch&billNo=:billNo"
+    },
+    {
       "source": "/invoice/:fileKey",
       "destination": "/api/invoice?fileKey=:fileKey"
     }
