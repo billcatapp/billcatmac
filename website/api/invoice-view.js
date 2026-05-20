@@ -12,6 +12,20 @@ async function supabaseGet(path) {
   return res.json();
 }
 
+async function supabasePost(path, body) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    method: 'POST',
+    headers: {
+      'apikey': SUPABASE_ANON_KEY,
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
 function fmt(n, sym = '₹') {
   return `${sym}${Number(n).toFixed(2)}`;
 }
@@ -191,32 +205,12 @@ export default async function handler(req, res) {
   const uidPrefix = uid.toLowerCase();
 
   try {
-    let tx = null;
+    const rows = await supabasePost('rpc/find_transaction_by_invoice', {
+      p_invoice: invoiceNo,
+      p_uid_prefix: uidPrefix,
+    });
 
-    // First: try to find by invoice_number
-    const byInvoiceNo = await supabaseGet(
-      `transactions?invoice_number=eq.${encodeURIComponent(invoiceNo)}&select=*&limit=10`
-    );
-    if (byInvoiceNo && byInvoiceNo.length > 0) {
-      tx = byInvoiceNo.find(r => {
-        const stripped = (r.user_id || '').replace(/-/g, '').toLowerCase();
-        return stripped.startsWith(uidPrefix);
-      });
-    }
-
-    // Fallback: search by id prefix (for old transactions with no invoice_number)
-    if (!tx) {
-      const byId = await supabaseGet(
-        `transactions?id=ilike.${encodeURIComponent(invoiceNo)}*&select=*&limit=10`
-      );
-      if (byId && byId.length > 0) {
-        tx = byId.find(r => {
-          const stripped = (r.user_id || '').replace(/-/g, '').toLowerCase();
-          return stripped.startsWith(uidPrefix);
-        });
-      }
-    }
-
+    const tx = (rows && rows.length > 0) ? rows[0] : null;
     if (!tx) return res.status(404).send(notFoundHtml());
 
     // Fetch store settings
