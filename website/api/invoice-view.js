@@ -205,12 +205,19 @@ export default async function handler(req, res) {
   const uidPrefix = uid.toLowerCase();
 
   try {
-    // Query transactions by invoice_number directly — no RPC needed
-    const rows = await supabaseGet(
+    // Query by invoice_number first
+    let rows = await supabaseGet(
       `transactions?invoice_number=eq.${encodeURIComponent(invoiceNo)}&select=*&limit=10`
     );
 
-    // Find the one whose user_id starts with our uid prefix (first 6 hex chars, dashes removed)
+    // Fallback: search by transaction ID prefix (for bills sent before invoice numbers were saved)
+    if (!rows || rows.length === 0) {
+      rows = await supabaseGet(
+        `transactions?id=like.${encodeURIComponent(invoiceNo.toLowerCase())}%25&select=*&limit=10`
+      );
+    }
+
+    // Match by uid prefix (first 6 hex chars of user_id, dashes removed)
     const tx = (rows || []).find(r => {
       const clean = (r.user_id || '').replace(/-/g, '').toLowerCase();
       return clean.startsWith(uidPrefix);
