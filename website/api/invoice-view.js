@@ -197,7 +197,19 @@ tbody td.right{text-align:right}
 }
 
 export default async function handler(req, res) {
-  const { uid, branch, billNo } = req.query;
+  let uid, branch, billNo;
+
+  if (req.query.slug) {
+    // New format: /invoices/2C965D01178199
+    // First 6 = uid, next 2 = branch, rest = invoiceNo
+    const slug = req.query.slug;
+    uid = slug.substring(0, 6);
+    branch = slug.substring(6, 8);
+    billNo = slug.substring(8);
+  } else {
+    ({ uid, branch, billNo } = req.query);
+  }
+
   if (!uid || !billNo) return res.status(400).send('Missing parameters');
 
   // Normalize: strip "Bill-" prefix if present

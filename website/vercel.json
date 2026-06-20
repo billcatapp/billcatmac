@@ -1,8 +1,8 @@
 {
   "rewrites": [
     {
-      "source": "/invoices/:uid/:branch/:billNo",
-      "destination": "/api/invoice-view?uid=:uid&branch=:branch&billNo=:billNo"
+      "source": "/invoices/:slug",
+      "destination": "/api/invoice-view?slug=:slug"
     },
     {
       "source": "/invoice/:uid/:branch/:billNo",
