@@ -51,7 +51,7 @@ function renderHtml({ tx, settings, shortUid, branch }) {
 
   const customerName = escHtml(tx.customer_name || '');
   const customerPhone = escHtml(tx.customer_phone || '');
-  const invoiceNo = escHtml(tx.invoice_number || tx.id.substring(0, 6).toUpperCase());
+  const invoiceNo = escHtml(tx.id.replace(/-/g, '').substring(0, 6).toUpperCase());
   const date = new Date(tx.created_at);
   const dateStr = `${date.getDate()}/${date.getMonth() + 1}/${date.getFullYear()}`;
   const timeStr = date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
