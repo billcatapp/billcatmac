@@ -222,10 +222,10 @@ export default async function handler(req, res) {
       `transactions?invoice_number=eq.${encodeURIComponent(invoiceNo)}&select=*&limit=10`
     );
 
-    // Fallback: search by transaction ID prefix (for bills sent before invoice numbers were saved)
+    // Fallback: search by transaction ID prefix (cast UUID to text for LIKE)
     if (!rows || rows.length === 0) {
       rows = await supabaseGet(
-        `transactions?id=like.${encodeURIComponent(invoiceNo.toLowerCase())}%25&select=*&limit=10`
+        `transactions?id::text=like.${encodeURIComponent(invoiceNo.toLowerCase())}*&select=*&limit=10`
       );
     }
 
