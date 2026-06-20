@@ -200,17 +200,22 @@ export default async function handler(req, res) {
   const { uid, branch, billNo } = req.query;
   if (!uid || !billNo) return res.status(400).send('Missing parameters');
 
-  // Normalize: strip "Bill-" prefix if present, uppercase uid for comparison
+  // Normalize: strip "Bill-" prefix if present
   const invoiceNo = billNo.replace(/^Bill-/i, '');
   const uidPrefix = uid.toLowerCase();
 
   try {
-    const rows = await supabasePost('rpc/find_transaction_by_invoice', {
-      p_invoice: invoiceNo,
-      p_uid_prefix: uidPrefix,
-    });
+    // Query transactions by invoice_number directly — no RPC needed
+    const rows = await supabaseGet(
+      `transactions?invoice_number=eq.${encodeURIComponent(invoiceNo)}&select=*&limit=10`
+    );
 
-    const tx = (rows && rows.length > 0) ? rows[0] : null;
+    // Find the one whose user_id starts with our uid prefix (first 6 hex chars, dashes removed)
+    const tx = (rows || []).find(r => {
+      const clean = (r.user_id || '').replace(/-/g, '').toLowerCase();
+      return clean.startsWith(uidPrefix);
+    }) || null;
+
     if (!tx) return res.status(404).send(notFoundHtml());
 
     // Fetch store settings
