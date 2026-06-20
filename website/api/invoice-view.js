@@ -197,44 +197,16 @@ tbody td.right{text-align:right}
 }
 
 export default async function handler(req, res) {
-  let uid, branch, billNo;
-
-  if (req.query.slug) {
-    // New format: /invoices/2C965D01178199
-    // First 6 = uid, next 2 = branch, rest = invoiceNo
-    const slug = req.query.slug;
-    uid = slug.substring(0, 6);
-    branch = slug.substring(6, 8);
-    billNo = slug.substring(8);
-  } else {
-    ({ uid, branch, billNo } = req.query);
-  }
-
-  if (!uid || !billNo) return res.status(400).send('Missing parameters');
-
-  // Normalize: strip "Bill-" prefix if present
-  const invoiceNo = billNo.replace(/^Bill-/i, '');
-  const uidPrefix = uid.toLowerCase();
+  const slug = req.query.slug || req.query.uid;
+  if (!slug) return res.status(400).send('Missing parameters');
 
   try {
-    // Query by invoice_number first
-    let rows = await supabaseGet(
-      `transactions?invoice_number=eq.${encodeURIComponent(invoiceNo)}&select=*&limit=10`
+    // Direct lookup by site_link column — single exact match
+    const rows = await supabaseGet(
+      `transactions?site_link=eq.${encodeURIComponent(slug.toLowerCase())}&select=*&limit=1`
     );
 
-    // Fallback: search by transaction ID prefix (cast UUID to text for LIKE)
-    if (!rows || rows.length === 0) {
-      rows = await supabaseGet(
-        `transactions?id::text=like.${encodeURIComponent(invoiceNo.toLowerCase())}*&select=*&limit=10`
-      );
-    }
-
-    // Match by uid prefix (first 6 hex chars of user_id, dashes removed)
-    const tx = (rows || []).find(r => {
-      const clean = (r.user_id || '').replace(/-/g, '').toLowerCase();
-      return clean.startsWith(uidPrefix);
-    }) || null;
-
+    const tx = (rows && rows[0]) || null;
     if (!tx) return res.status(404).send(notFoundHtml());
 
     // Fetch store settings
@@ -243,8 +215,7 @@ export default async function handler(req, res) {
     );
     const settings = (settingsRows && settingsRows[0]) || {};
 
-    const shortUid = uid.toUpperCase();
-    const html = renderHtml({ tx, settings, shortUid, branch });
+    const html = renderHtml({ tx, settings });
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=60');
