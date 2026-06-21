@@ -7,17 +7,42 @@ import 'package:printing/printing.dart';
 export 'package:printing/printing.dart' show Printer;
 import '../models/transaction_record.dart';
 
+// Combines product name with description on a new line for table cells.
+String _itemLabel(TransactionItem i) => i.description.trim().isEmpty
+    ? i.productName
+    : '${i.productName}\n${i.description.trim()}';
+
 class ReceiptPrinter {
   static pw.Font? _regular;
   static pw.Font? _bold;
+  static pw.Font? _poppinsRegular;
+  static pw.Font? _poppinsBold;
+  static pw.Font? _serifRegular;
+  static pw.Font? _serifBold;
+
+  // Cached future so concurrent callers all await the same load, never race.
+  static Future<void>? _warmFuture;
 
   /// Load fonts from bundled assets (no network) so first print is instant.
-  static Future<void> preWarm() async {
-    if (_regular != null) return;
-    final r = await rootBundle.load('assets/fonts/NotoSans-Regular.ttf');
-    final b = await rootBundle.load('assets/fonts/NotoSans-Bold.ttf');
-    _regular = pw.Font.ttf(r);
-    _bold    = pw.Font.ttf(b);
+  static Future<void> preWarm() {
+    if (_regular != null) return Future.value();
+    _warmFuture ??= _doWarm();
+    return _warmFuture!;
+  }
+
+  static Future<void> _doWarm() async {
+    final r  = await rootBundle.load('assets/fonts/NotoSans-Regular.ttf');
+    final b  = await rootBundle.load('assets/fonts/NotoSans-Bold.ttf');
+    final pr = await rootBundle.load('assets/fonts/Poppins-Regular.ttf');
+    final pb = await rootBundle.load('assets/fonts/Poppins-Bold.ttf');
+    final sr = await rootBundle.load('assets/fonts/SourceSerif4-Regular.ttf');
+    final sb = await rootBundle.load('assets/fonts/SourceSerif4-Bold.ttf');
+    _regular        = pw.Font.ttf(r);
+    _bold           = pw.Font.ttf(b);
+    _poppinsRegular = pw.Font.ttf(pr);
+    _poppinsBold    = pw.Font.ttf(pb);
+    _serifRegular   = pw.Font.ttf(sr);
+    _serifBold      = pw.Font.ttf(sb);
   }
 
   static Future<void> printReceipt(
@@ -120,6 +145,8 @@ class ReceiptPrinter {
     String layout = 'Classic',
     String storeTerms = '',
     String logoPath = '',
+    String storeUpiId = '',
+    String docType = 'Invoice',
   }) async {
     // ── Named-layout routers ──────────────────────────────────────────────
     final _sharedArgs = (
@@ -127,19 +154,20 @@ class ReceiptPrinter {
       storePhone: storePhone, storeEmail: storeEmail, storeGstin: storeGstin,
       receiptFooter: receiptFooter, taxLabel: taxLabel, taxRate: taxRate,
       currencySymbol: currencySymbol, storeTerms: storeTerms, logoPath: logoPath,
+      storeUpiId: storeUpiId,
     );
 
     switch (layout) {
       case 'Classic':
-        return _buildClassicInvoicePdf(tx, storeName: _sharedArgs.storeName, storeAddress: _sharedArgs.storeAddress, storePhone: _sharedArgs.storePhone, storeEmail: _sharedArgs.storeEmail, storeGstin: _sharedArgs.storeGstin, receiptFooter: _sharedArgs.receiptFooter, taxLabel: _sharedArgs.taxLabel, taxRate: _sharedArgs.taxRate, currencySymbol: _sharedArgs.currencySymbol, storeTerms: _sharedArgs.storeTerms, logoPath: _sharedArgs.logoPath);
+        return _buildClassicInvoicePdf(tx, storeName: _sharedArgs.storeName, storeAddress: _sharedArgs.storeAddress, storePhone: _sharedArgs.storePhone, storeEmail: _sharedArgs.storeEmail, storeGstin: _sharedArgs.storeGstin, receiptFooter: _sharedArgs.receiptFooter, taxLabel: _sharedArgs.taxLabel, taxRate: _sharedArgs.taxRate, currencySymbol: _sharedArgs.currencySymbol, storeTerms: _sharedArgs.storeTerms, logoPath: _sharedArgs.logoPath, storeUpiId: _sharedArgs.storeUpiId, docType: docType);
       case 'Modern':
-        return _buildModern4Pdf(tx, storeName: _sharedArgs.storeName, storeAddress: _sharedArgs.storeAddress, storePhone: _sharedArgs.storePhone, storeEmail: _sharedArgs.storeEmail, storeGstin: _sharedArgs.storeGstin, receiptFooter: _sharedArgs.receiptFooter, taxLabel: _sharedArgs.taxLabel, taxRate: _sharedArgs.taxRate, currencySymbol: _sharedArgs.currencySymbol, storeTerms: _sharedArgs.storeTerms, logoPath: _sharedArgs.logoPath);
+        return _buildModern4Pdf(tx, storeName: _sharedArgs.storeName, storeAddress: _sharedArgs.storeAddress, storePhone: _sharedArgs.storePhone, storeEmail: _sharedArgs.storeEmail, storeGstin: _sharedArgs.storeGstin, receiptFooter: _sharedArgs.receiptFooter, taxLabel: _sharedArgs.taxLabel, taxRate: _sharedArgs.taxRate, currencySymbol: _sharedArgs.currencySymbol, storeTerms: _sharedArgs.storeTerms, logoPath: _sharedArgs.logoPath, storeUpiId: _sharedArgs.storeUpiId);
       case 'GST':
-        return _buildGstPdf(tx, storeName: _sharedArgs.storeName, storeAddress: _sharedArgs.storeAddress, storePhone: _sharedArgs.storePhone, storeEmail: _sharedArgs.storeEmail, storeGstin: _sharedArgs.storeGstin, receiptFooter: _sharedArgs.receiptFooter, taxLabel: _sharedArgs.taxLabel, taxRate: _sharedArgs.taxRate, currencySymbol: _sharedArgs.currencySymbol, storeTerms: _sharedArgs.storeTerms, logoPath: _sharedArgs.logoPath);
+        return _buildGstPdf(tx, storeName: _sharedArgs.storeName, storeAddress: _sharedArgs.storeAddress, storePhone: _sharedArgs.storePhone, storeEmail: _sharedArgs.storeEmail, storeGstin: _sharedArgs.storeGstin, receiptFooter: _sharedArgs.receiptFooter, taxLabel: _sharedArgs.taxLabel, taxRate: _sharedArgs.taxRate, currencySymbol: _sharedArgs.currencySymbol, storeTerms: _sharedArgs.storeTerms, logoPath: _sharedArgs.logoPath, docType: docType);
       case 'Landscape':
         return _buildLandscapePdf(tx, storeName: _sharedArgs.storeName, storeAddress: _sharedArgs.storeAddress, storePhone: _sharedArgs.storePhone, storeEmail: _sharedArgs.storeEmail, storeGstin: _sharedArgs.storeGstin, receiptFooter: _sharedArgs.receiptFooter, taxLabel: _sharedArgs.taxLabel, taxRate: _sharedArgs.taxRate, currencySymbol: _sharedArgs.currencySymbol, storeTerms: _sharedArgs.storeTerms, logoPath: _sharedArgs.logoPath);
       case 'Simple':
-        return _buildSimplePdf(tx, storeName: _sharedArgs.storeName, storeAddress: _sharedArgs.storeAddress, storePhone: _sharedArgs.storePhone, storeEmail: _sharedArgs.storeEmail, storeGstin: _sharedArgs.storeGstin, receiptFooter: _sharedArgs.receiptFooter, taxLabel: _sharedArgs.taxLabel, taxRate: _sharedArgs.taxRate, currencySymbol: _sharedArgs.currencySymbol, storeTerms: _sharedArgs.storeTerms, logoPath: _sharedArgs.logoPath);
+        return _buildSimplePdf(tx, storeName: _sharedArgs.storeName, storeAddress: _sharedArgs.storeAddress, storePhone: _sharedArgs.storePhone, storeEmail: _sharedArgs.storeEmail, storeGstin: _sharedArgs.storeGstin, receiptFooter: _sharedArgs.receiptFooter, taxLabel: _sharedArgs.taxLabel, taxRate: _sharedArgs.taxRate, currencySymbol: _sharedArgs.currencySymbol, storeTerms: _sharedArgs.storeTerms, logoPath: _sharedArgs.logoPath, docType: docType);
       case 'Theme 5':
         return _buildDetailedPdf(tx, storeName: _sharedArgs.storeName, storeAddress: _sharedArgs.storeAddress, storePhone: _sharedArgs.storePhone, storeGstin: _sharedArgs.storeGstin, receiptFooter: _sharedArgs.receiptFooter, taxLabel: _sharedArgs.taxLabel, taxRate: _sharedArgs.taxRate, currencySymbol: _sharedArgs.currencySymbol, paperSize: paperSize);
     }
@@ -257,7 +285,7 @@ class ReceiptPrinter {
             ...tx.items.map((item) => pw.Padding(
                   padding: pw.EdgeInsets.symmetric(vertical: isCompact ? 1.5 : 2.5),
                   child: pw.Row(children: [
-                    pw.Expanded(flex: 5, child: pw.Text(item.productName,
+                    pw.Expanded(flex: 5, child: pw.Text(_itemLabel(item),
                         style: pw.TextStyle(font: regular, fontSize: fs))),
                     pw.Container(width: 28, child: pw.Text('x${item.quantity}',
                         textAlign: pw.TextAlign.center,
@@ -374,6 +402,7 @@ class ReceiptPrinter {
     String storePhone = '', String storeEmail = '', String storeGstin = '',
     required String receiptFooter, required String taxLabel,
     required String taxRate, required String currencySymbol, required String paperSize,
+    String docType = 'Invoice',
   }) async {
     await preWarm();
     final r = _regular!; final b = _bold!;
@@ -394,7 +423,7 @@ class ReceiptPrinter {
               if (storeGstin.isNotEmpty) pw.Text('GSTIN: $storeGstin', style: pw.TextStyle(font: b, fontSize: fs - 1, color: PdfColors.grey100)),
             ])),
             pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
-              pw.Text('INVOICE', style: pw.TextStyle(font: b, fontSize: 16, color: PdfColors.grey300, letterSpacing: 2)),
+              pw.Text(docType.toUpperCase(), style: pw.TextStyle(font: b, fontSize: 16, color: PdfColors.grey300, letterSpacing: 2)),
               pw.SizedBox(height: 4),
               pw.Text('#${tx.id.substring(0, 6).toUpperCase()}', style: pw.TextStyle(font: b, fontSize: fs, color: PdfColors.white)),
               pw.Text(_fmt(tx.createdAt), style: pw.TextStyle(font: r, fontSize: fs - 1, color: PdfColors.grey300)),
@@ -408,7 +437,7 @@ class ReceiptPrinter {
             // Items
             pw.TableHelper.fromTextArray(
               headers: ['ITEM', 'QTY', 'UNIT PRICE', 'TOTAL'],
-              data: tx.items.map((i) => [i.productName, '${i.quantity}', '$currencySymbol${i.price.toStringAsFixed(2)}', '$currencySymbol${i.total.toStringAsFixed(2)}']).toList(),
+              data: tx.items.map((i) => [_itemLabel(i), '${i.quantity}', '$currencySymbol${i.price.toStringAsFixed(2)}', '$currencySymbol${i.total.toStringAsFixed(2)}']).toList(),
               headerStyle: pw.TextStyle(font: b, fontSize: fs - 1.5, color: PdfColors.white),
               headerDecoration: const pw.BoxDecoration(color: PdfColors.grey800),
               cellStyle: pw.TextStyle(font: r, fontSize: fs - 0.5),
@@ -449,6 +478,7 @@ class ReceiptPrinter {
     String storePhone = '', String storeEmail = '', String storeGstin = '',
     required String receiptFooter, required String taxLabel,
     required String taxRate, required String currencySymbol, required String paperSize,
+    String docType = 'Invoice',
   }) async {
     await preWarm();
     final r = _regular!; final b = _bold!;
@@ -457,7 +487,7 @@ class ReceiptPrinter {
     final doc = pw.Document();
     doc.addPage(pw.Page(pageFormat: PdfPageFormat.a4, margin: const pw.EdgeInsets.all(28), build: (_) {
       return pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.stretch, children: [
-        pw.Center(child: pw.Text('INVOICE', style: pw.TextStyle(font: b, fontSize: 18, letterSpacing: 3))),
+        pw.Center(child: pw.Text(docType.toUpperCase(), style: pw.TextStyle(font: b, fontSize: 18, letterSpacing: 3))),
         pw.SizedBox(height: 12),
         pw.Table(border: const pw.TableBorder(bottom: grey4, verticalInside: grey4),
           columnWidths: const {0: pw.FlexColumnWidth(55), 1: pw.FlexColumnWidth(45)},
@@ -480,7 +510,7 @@ class ReceiptPrinter {
         pw.SizedBox(height: 12),
         pw.TableHelper.fromTextArray(
           headers: ['#', 'Item Name', 'Qty', 'Unit Price', 'Amount'],
-          data: tx.items.asMap().entries.map((e) => ['${e.key+1}', e.value.productName, '${e.value.quantity}', '$currencySymbol${e.value.price.toStringAsFixed(2)}', '$currencySymbol${e.value.total.toStringAsFixed(2)}']).toList(),
+          data: tx.items.asMap().entries.map((e) => ['${e.key+1}', _itemLabel(e.value), '${e.value.quantity}', '$currencySymbol${e.value.price.toStringAsFixed(2)}', '$currencySymbol${e.value.total.toStringAsFixed(2)}']).toList(),
           headerStyle: pw.TextStyle(font: b, fontSize: fs - 1.5, color: PdfColors.white),
           headerDecoration: const pw.BoxDecoration(color: PdfColors.grey700),
           cellStyle: pw.TextStyle(font: r, fontSize: fs - 0.5),
@@ -544,8 +574,8 @@ class ReceiptPrinter {
         pw.TableHelper.fromTextArray(
           headers: isNarrow ? ['Item', 'Qty', 'Rate', 'Tax', 'Amt'] : ['#', 'Item Name', 'HSN/SAC', 'Qty', 'Rate', 'Disc', 'Tax%', 'Amount'],
           data: isNarrow
-              ? tx.items.map((i) => [i.productName, '${i.quantity}', '$currencySymbol${i.price.toStringAsFixed(2)}', '$currencySymbol${(i.price * i.quantity * taxRateVal / 100).toStringAsFixed(2)}', '$currencySymbol${i.total.toStringAsFixed(2)}']).toList()
-              : tx.items.asMap().entries.map((e) => ['${e.key+1}', e.value.productName, '—', '${e.value.quantity}', '$currencySymbol${e.value.price.toStringAsFixed(2)}', '${currencySymbol}0.00', '$taxRate%', '$currencySymbol${e.value.total.toStringAsFixed(2)}']).toList(),
+              ? tx.items.map((i) => [_itemLabel(i), '${i.quantity}', '$currencySymbol${i.price.toStringAsFixed(2)}', '$currencySymbol${(i.price * i.quantity * taxRateVal / 100).toStringAsFixed(2)}', '$currencySymbol${i.total.toStringAsFixed(2)}']).toList()
+              : tx.items.asMap().entries.map((e) => ['${e.key+1}', _itemLabel(e.value), '—', '${e.value.quantity}', '$currencySymbol${e.value.price.toStringAsFixed(2)}', '${currencySymbol}0.00', '$taxRate%', '$currencySymbol${e.value.total.toStringAsFixed(2)}']).toList(),
           headerStyle: pw.TextStyle(font: b, fontSize: fs - 2, color: PdfColors.white),
           headerDecoration: const pw.BoxDecoration(color: PdfColors.grey700),
           cellStyle: pw.TextStyle(font: r, fontSize: fs - 1.5),
@@ -599,7 +629,7 @@ class ReceiptPrinter {
               pw.Padding(padding: const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 3), child: pw.Text(h, style: pw.TextStyle(font: b, fontSize: fs - 2, color: PdfColors.white))),
           ]),
           ...items.map((i) => pw.TableRow(children: [
-            pw.Padding(padding: const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 3), child: pw.Text(i.productName, style: pw.TextStyle(font: r, fontSize: fs - 1.5))),
+            pw.Padding(padding: const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 3), child: pw.Text(_itemLabel(i), style: pw.TextStyle(font: r, fontSize: fs - 1.5))),
             pw.Padding(padding: const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 3), child: pw.Text('${i.quantity}', textAlign: pw.TextAlign.center, style: pw.TextStyle(font: r, fontSize: fs - 1.5))),
             pw.Padding(padding: const pw.EdgeInsets.symmetric(horizontal: 3, vertical: 3), child: pw.Text('$currencySymbol${i.total.toStringAsFixed(0)}', textAlign: pw.TextAlign.right, style: pw.TextStyle(font: b, fontSize: fs - 1.5))),
           ])),
@@ -685,7 +715,7 @@ class ReceiptPrinter {
         pw.SizedBox(height: 6),
         pw.TableHelper.fromTextArray(
           headers: ['#', 'Item Name', 'Qty', 'Unit Price', 'Amount'],
-          data: tx.items.asMap().entries.map((e) => ['${e.key+1}', e.value.productName, '${e.value.quantity}', '$currencySymbol${e.value.price.toStringAsFixed(2)}', '$currencySymbol${e.value.total.toStringAsFixed(2)}']).toList(),
+          data: tx.items.asMap().entries.map((e) => ['${e.key+1}', _itemLabel(e.value), '${e.value.quantity}', '$currencySymbol${e.value.price.toStringAsFixed(2)}', '$currencySymbol${e.value.total.toStringAsFixed(2)}']).toList(),
           headerStyle: pw.TextStyle(font: b, fontSize: fs - 1.5, color: PdfColors.white),
           headerDecoration: const pw.BoxDecoration(color: PdfColors.grey700),
           cellStyle: pw.TextStyle(font: r, fontSize: fs - 0.5),
@@ -721,6 +751,7 @@ class ReceiptPrinter {
     required String receiptFooter, required String taxLabel,
     required String taxRate, required String currencySymbol,
     String storeTerms = '', required String paperSize,
+    String docType = 'Invoice',
   }) async {
     await preWarm();
     final r = _regular!; final b = _bold!;
@@ -743,7 +774,7 @@ class ReceiptPrinter {
                 if (storeGstin.isNotEmpty) pw.Text('GSTIN: $storeGstin', style: pw.TextStyle(font: b, fontSize: fs - 1)),
               ])),
               pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
-                pw.Text('TAX INVOICE', style: pw.TextStyle(font: b, fontSize: 14, letterSpacing: 1)),
+                pw.Text(docType == 'Quotation' ? 'QUOTATION' : 'TAX INVOICE', style: pw.TextStyle(font: b, fontSize: 14, letterSpacing: 1)),
                 pw.SizedBox(height: 4),
                 pw.Text('No.: $invoiceNo', style: pw.TextStyle(font: r, fontSize: fs - 1)),
                 pw.Text('Date: ${_fmtDate(tx.createdAt)}', style: pw.TextStyle(font: r, fontSize: fs - 1)),
@@ -764,7 +795,7 @@ class ReceiptPrinter {
             padding: const pw.EdgeInsets.all(0),
             child: pw.TableHelper.fromTextArray(
               headers: ['Sl.', 'Description of Goods', 'HSN/SAC', 'Qty', 'Rate', 'Disc.', 'Amount'],
-              data: tx.items.asMap().entries.map((e) => ['${e.key+1}', e.value.productName, '—', '${e.value.quantity}', '$currencySymbol${e.value.price.toStringAsFixed(2)}', '—', '$currencySymbol${e.value.total.toStringAsFixed(2)}']).toList(),
+              data: tx.items.asMap().entries.map((e) => ['${e.key+1}', _itemLabel(e.value), '—', '${e.value.quantity}', '$currencySymbol${e.value.price.toStringAsFixed(2)}', '—', '$currencySymbol${e.value.total.toStringAsFixed(2)}']).toList(),
               headerStyle: pw.TextStyle(font: b, fontSize: fs - 1.5, color: PdfColors.white),
               headerDecoration: const pw.BoxDecoration(color: PdfColors.grey700),
               cellStyle: pw.TextStyle(font: r, fontSize: fs - 0.5),
@@ -842,10 +873,12 @@ class ReceiptPrinter {
     required String currencySymbol,
     String storeTerms = '',
     String logoPath = '',
+    String storeUpiId = '',
+    String docType = 'Invoice',
   }) async {
     await preWarm();
-    final r = _regular!;
-    final b = _bold!;
+    final r = _serifRegular!;
+    final b = _serifBold!;
     pw.ImageProvider? logoImage;
     if (logoPath.isNotEmpty) {
       try {
@@ -854,12 +887,8 @@ class ReceiptPrinter {
       } catch (_) {}
     }
     const fs = 8.5;
-    final taxRateVal = double.tryParse(taxRate) ?? 0.0;
-    final halfRate   = taxRateVal / 2;
-    final cgst       = tx.taxAmount / 2;
-    final sgst       = tx.taxAmount / 2;
     final totalQty   = tx.items.fold<int>(0, (s, i) => s + i.quantity);
-    final invoiceNo  = 'Inv. ${tx.id.substring(0, 6).toUpperCase()}';
+    final invoiceNo  = tx.invoiceNumber != null ? '${tx.invoiceNumber}' : tx.id.substring(0, 6).toUpperCase();
 
     const grey4 = pw.BorderSide(color: PdfColors.grey400, width: 0.5);
     const grey6 = pw.BorderSide(color: PdfColors.grey600, width: 0.8);
@@ -900,18 +929,26 @@ class ReceiptPrinter {
 
     // Items table rows
     final itemRows = tx.items.asMap().entries.map((e) {
-      final itemTotal = e.value.price * e.value.quantity;
-      final disc = itemTotal * (0.0 / 100);
-      final gstAmt = itemTotal * taxRateVal / (100 + taxRateVal);
+      final disc = e.value.price * e.value.quantity * (0.0 / 100);
+      final hasDesc = e.value.description.trim().isNotEmpty;
       return pw.TableRow(children: [
         pd(tx_('${e.key + 1}', a: pw.TextAlign.center, s: fs - 1)),
-        pd(tx_(e.value.productName, f: b, s: fs - 1)),
+        pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 5, vertical: 3),
+          child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+            tx_(e.value.productName, f: b, s: fs - 1),
+            if (hasDesc) ...[
+              pw.SizedBox(height: 1),
+              tx_(e.value.description.trim(), s: fs - 2.5, c: PdfColors.grey500),
+            ],
+          ]),
+        ),
         pd(tx_('—', a: pw.TextAlign.center, s: fs - 1)),
         pd(tx_('${e.value.quantity}', a: pw.TextAlign.center, s: fs - 1)),
-        pd(tx_(e.value.price.toStringAsFixed(2), a: pw.TextAlign.right, s: fs - 1)),
-        pd(tx_('${disc.toStringAsFixed(2)} (0%)', a: pw.TextAlign.right, s: fs - 2)),
-        pd(tx_('${gstAmt.toStringAsFixed(2)} ($taxRate%)', a: pw.TextAlign.right, s: fs - 2)),
-        pd(tx_(e.value.total.toStringAsFixed(2), f: b, a: pw.TextAlign.right, s: fs - 1)),
+        pd(tx_('-', a: pw.TextAlign.center, s: fs - 1)),
+        pd(tx_('₹ ${e.value.price.toStringAsFixed(2)}', a: pw.TextAlign.right, s: fs - 1)),
+        pd(tx_('₹ ${disc.toStringAsFixed(2)}', a: pw.TextAlign.right, s: fs - 1)),
+        pd(tx_('₹ ${e.value.total.toStringAsFixed(2)}', f: b, a: pw.TextAlign.right, s: fs - 1)),
       ]);
     }).toList();
 
@@ -932,97 +969,87 @@ class ReceiptPrinter {
             child: pw.Center(child: tx_('Tax Invoice', f: b, s: fs + 1)),
           ),
 
-          // ── Company info (left) | Invoice details (right) ─────────────
+          // ── Company info — full width (logo left, store info right) ──
+          pw.Container(
+            decoration: const pw.BoxDecoration(border: pw.Border(bottom: grey4)),
+            padding: const pw.EdgeInsets.all(10),
+            child: pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+              // Logo
+              pw.Container(
+                width: 60, height: 60,
+                decoration: pw.BoxDecoration(
+                  color: PdfColors.grey200,
+                  border: pw.Border.all(color: PdfColors.grey400, width: 0.5),
+                ),
+                child: logoImage != null
+                    ? pw.Image(logoImage, fit: pw.BoxFit.contain)
+                    : pw.Center(child: tx_('Image', s: 7, c: PdfColors.grey500)),
+              ),
+              pw.SizedBox(width: 10),
+              // Store info
+              pw.Expanded(child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+                tx_(storeName.isNotEmpty ? storeName : 'Company', f: b, s: 22),
+                pw.SizedBox(height: 2),
+                if (storeAddress.isNotEmpty) ...[
+                  tx_(storeAddress, s: fs - 1, c: PdfColors.grey700),
+                  pw.SizedBox(height: 3),
+                ],
+                // Phone left | Email right
+                if (storePhone.isNotEmpty || storeEmail.isNotEmpty) ...[
+                  pw.Row(children: [
+                    if (storePhone.isNotEmpty) pw.RichText(text: pw.TextSpan(children: [
+                      pw.TextSpan(text: 'Phone: ', style: pw.TextStyle(font: r, fontSize: fs - 1, color: PdfColors.grey700)),
+                      pw.TextSpan(text: storePhone, style: pw.TextStyle(font: b, fontSize: fs - 1)),
+                    ])),
+                    pw.Spacer(),
+                    if (storeEmail.isNotEmpty) pw.RichText(text: pw.TextSpan(children: [
+                      pw.TextSpan(text: 'Email: ', style: pw.TextStyle(font: r, fontSize: fs - 1, color: PdfColors.grey700)),
+                      pw.TextSpan(text: storeEmail, style: pw.TextStyle(font: b, fontSize: fs - 1)),
+                    ])),
+                  ]),
+                  pw.SizedBox(height: 2),
+                ],
+                // GSTIN left | State right (if GSTIN has state prefix)
+                if (storeGstin.isNotEmpty) pw.Row(children: [
+                  pw.RichText(text: pw.TextSpan(children: [
+                    pw.TextSpan(text: 'GSTIN: ', style: pw.TextStyle(font: r, fontSize: fs - 1, color: PdfColors.grey700)),
+                    pw.TextSpan(text: storeGstin, style: pw.TextStyle(font: b, fontSize: fs - 1)),
+                  ])),
+                  pw.Spacer(),
+                ]),
+              ])),
+            ]),
+          ),
+
+          // ── Bill To (left) | Invoice Details (right) ──────────────────
           pw.Table(
             border: const pw.TableBorder(bottom: grey4, verticalInside: grey4),
             columnWidths: const {0: pw.FlexColumnWidth(55), 1: pw.FlexColumnWidth(45)},
             children: [pw.TableRow(children: [
               pw.Padding(
-                padding: const pw.EdgeInsets.all(10),
-                child: pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-                  pw.Container(
-                    width: 60, height: 60,
-                    decoration: pw.BoxDecoration(
-                      color: PdfColors.grey200,
-                      border: pw.Border.all(color: PdfColors.grey400, width: 0.5),
-                    ),
-                    child: logoImage != null
-                        ? pw.Image(logoImage, fit: pw.BoxFit.contain)
-                        : pw.Center(child: tx_('Image', s: 7, c: PdfColors.grey500)),
-                  ),
-                  pw.SizedBox(width: 10),
-                  pw.Expanded(child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-                    tx_(storeName.isNotEmpty ? storeName : 'Company', f: b, s: 18),
-                    pw.SizedBox(height: 3),
-                    if (storeAddress.isNotEmpty) ...[
-                      tx_(storeAddress, s: fs - 1, c: PdfColors.grey700),
-                      pw.SizedBox(height: 2),
-                    ],
-                    if (storePhone.isNotEmpty) pw.RichText(text: pw.TextSpan(children: [
-                      pw.TextSpan(text: 'Phone: ', style: pw.TextStyle(font: r, fontSize: fs - 1, color: PdfColors.grey700)),
-                      pw.TextSpan(text: storePhone, style: pw.TextStyle(font: b, fontSize: fs - 1)),
-                    ])),
-                    if (storeEmail.isNotEmpty) ...[
-                      pw.SizedBox(height: 2),
-                      pw.RichText(text: pw.TextSpan(children: [
-                        pw.TextSpan(text: 'Email: ', style: pw.TextStyle(font: r, fontSize: fs - 1, color: PdfColors.grey700)),
-                        pw.TextSpan(text: storeEmail, style: pw.TextStyle(font: b, fontSize: fs - 1)),
-                      ])),
-                    ],
-                    if (storeGstin.isNotEmpty) ...[
-                      pw.SizedBox(height: 2),
-                      tx_('GSTIN: $storeGstin', f: b, s: fs - 1),
-                    ],
-                  ])),
+                padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+                  tx_('Bill To:', f: b, s: fs - 0.5),
+                  pw.SizedBox(height: 4),
+                  tx_(tx.customerName?.isNotEmpty == true ? tx.customerName! : 'Walk-In Customer', f: b, s: fs + 1),
+                  if (tx.customerPhone != null && tx.customerPhone!.isNotEmpty) ...[
+                    pw.SizedBox(height: 2),
+                    tx_('Contact No: ${tx.customerPhone}', s: fs - 1, c: PdfColors.grey700),
+                  ],
                 ]),
               ),
               pw.Padding(
-                padding: const pw.EdgeInsets.all(10),
+                padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                 child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-                  detRow('Invoice No.', invoiceNo),
+                  tx_('Invoice Details:', f: b, s: fs - 0.5),
+                  pw.SizedBox(height: 4),
+                  detRow('No', invoiceNo),
                   detRow('Date', _fmtDate(tx.createdAt)),
                   detRow('Time', _fmtTime(tx.createdAt)),
-                  detRow('Due Date', _fmtDate(tx.createdAt)),
                 ]),
               ),
             ])],
           ),
-
-          // ── Bill To (full width) ───────────────────────────────────────
-          pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.stretch, children: [
-            pw.Container(
-              decoration: pw.BoxDecoration(color: PdfColors.grey200, border: pw.Border(bottom: grey4)),
-              padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-              child: tx_('Bill To:', f: b, s: fs - 0.5),
-            ),
-            pw.Container(
-              decoration: const pw.BoxDecoration(border: pw.Border(bottom: grey4)),
-              padding: const pw.EdgeInsets.all(8),
-              child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-                tx_(tx.customerName?.isNotEmpty == true ? tx.customerName! : 'Walk-In Customer', s: fs - 1),
-                pw.SizedBox(height: 3),
-                if (tx.customerPhone != null && tx.customerPhone!.isNotEmpty)
-                  tx_('Contact No.: ${tx.customerPhone}', s: fs - 1.5, c: PdfColors.grey700),
-                pw.SizedBox(height: 6),
-              ]),
-            ),
-          ]),
-
-          // ── Ship To (full width) ───────────────────────────────────────
-          pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.stretch, children: [
-            pw.Container(
-              decoration: pw.BoxDecoration(color: PdfColors.grey200, border: pw.Border(bottom: grey4)),
-              padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-              child: tx_('Ship To:', f: b, s: fs - 0.5),
-            ),
-            pw.Container(
-              decoration: const pw.BoxDecoration(border: pw.Border(bottom: grey4)),
-              padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-              child: tx_(
-                tx.customerName?.isNotEmpty == true ? tx.customerName! : '—',
-                s: fs - 1, c: PdfColors.grey700),
-            ),
-          ]),
 
           // ── Items table ────────────────────────────────────────────────
           pw.Table(
@@ -1032,12 +1059,12 @@ class ReceiptPrinter {
             columnWidths: const {
               0: pw.FixedColumnWidth(14),
               1: pw.FlexColumnWidth(3.5),
-              2: pw.FixedColumnWidth(40),
-              3: pw.FixedColumnWidth(34),
-              4: pw.FixedColumnWidth(50),
-              5: pw.FixedColumnWidth(58),
-              6: pw.FixedColumnWidth(54),
-              7: pw.FixedColumnWidth(48),
+              2: pw.FixedColumnWidth(42),
+              3: pw.FixedColumnWidth(48),
+              4: pw.FixedColumnWidth(20),
+              5: pw.FixedColumnWidth(60),
+              6: pw.FixedColumnWidth(60),
+              7: pw.FixedColumnWidth(58),
             },
             children: [
               pw.TableRow(
@@ -1045,9 +1072,10 @@ class ReceiptPrinter {
                 children: [
                   for (final h in [
                     ('#', pw.TextAlign.center), ('Item name', pw.TextAlign.left),
-                    ('HSC/SAC', pw.TextAlign.center), ('Quantity', pw.TextAlign.center),
-                    ('Price/unit', pw.TextAlign.right), ('Discount', pw.TextAlign.right),
-                    ('GST', pw.TextAlign.right), ('Amount', pw.TextAlign.right),
+                    ('HSN/SAC', pw.TextAlign.center), ('Quantity', pw.TextAlign.center),
+                    ('Unit', pw.TextAlign.center),
+                    ('Price/Unit(₹)', pw.TextAlign.right), ('Discount(₹)', pw.TextAlign.right),
+                    ('Amount(₹)', pw.TextAlign.right),
                   ])
                     pw.Padding(
                       padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5),
@@ -1061,137 +1089,54 @@ class ReceiptPrinter {
                 decoration: const pw.BoxDecoration(color: PdfColors.grey100),
                 children: [
                   pw.SizedBox(),
-                  pd(tx_('TOTAL', f: b, s: fs - 1)),
+                  pd(tx_('Total', f: b, s: fs - 1)),
                   pw.SizedBox(),
                   pd(tx_('$totalQty', f: b, a: pw.TextAlign.center, s: fs - 1)),
                   pw.SizedBox(),
-                  pd(tx_(tx.discountAmount.toStringAsFixed(2),
+                  pw.SizedBox(),
+                  pd(tx_('₹ ${tx.discountAmount.toStringAsFixed(2)}',
                       f: b, a: pw.TextAlign.right, s: fs - 1)),
-                  pd(tx_(tx.taxAmount.toStringAsFixed(2),
-                      f: b, a: pw.TextAlign.right, s: fs - 1)),
-                  pd(tx_(tx.total.toStringAsFixed(2),
+                  pd(tx_('₹ ${tx.total.toStringAsFixed(2)}',
                       f: b, a: pw.TextAlign.right, s: fs - 1)),
                 ],
               ),
             ],
           ),
 
-          // ── Tax Summary (left) | Totals (right) ───────────────────────
+          // ── Payment Mode (left) | Totals (right) ──────────────────────
           pw.Table(
             border: const pw.TableBorder(bottom: grey4, verticalInside: grey4),
             columnWidths: const {0: pw.FlexColumnWidth(55), 1: pw.FlexColumnWidth(45)},
             children: [pw.TableRow(children: [
-              // Left: merged CGST/SGST tax table + Payment Mode
-              pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.stretch, children: [
-                pw.Container(
-                  decoration: const pw.BoxDecoration(border: pw.Border(top: grey4)),
-                  child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.stretch, children: [
-                    // Merged header row
-                    pw.Container(
-                      color: PdfColors.grey100,
-                      child: pw.Row(children: [
-                        pw.Expanded(flex: 12, child: pw.Container(
-                          decoration: const pw.BoxDecoration(border: pw.Border(right: grey4)),
-                          alignment: pw.Alignment.center,
-                          padding: const pw.EdgeInsets.symmetric(horizontal: 2, vertical: 3),
-                          child: tx_('HSN/\nSAC', f: b, s: fs - 3, a: pw.TextAlign.center),
-                        )),
-                        pw.Expanded(flex: 16, child: pw.Container(
-                          decoration: const pw.BoxDecoration(border: pw.Border(right: grey4)),
-                          alignment: pw.Alignment.center,
-                          padding: const pw.EdgeInsets.symmetric(horizontal: 2, vertical: 3),
-                          child: tx_('Taxable\namount(₹)', f: b, s: fs - 3, a: pw.TextAlign.center),
-                        )),
-                        // CGST group
-                        pw.Expanded(flex: 24, child: pw.Container(
-                          decoration: const pw.BoxDecoration(border: pw.Border(right: grey4)),
-                          child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.stretch, children: [
-                            pw.Container(
-                              decoration: const pw.BoxDecoration(border: pw.Border(bottom: grey4)),
-                              padding: const pw.EdgeInsets.symmetric(vertical: 2),
-                              child: pw.Center(child: tx_('CGST', f: b, s: fs - 3)),
-                            ),
-                            pw.Row(children: [
-                              pw.Expanded(flex: 11, child: pw.Container(
-                                decoration: const pw.BoxDecoration(border: pw.Border(right: grey4)),
-                                padding: const pw.EdgeInsets.symmetric(horizontal: 2, vertical: 2),
-                                child: tx_('Rate(%)', f: b, s: fs - 3.5, a: pw.TextAlign.center),
-                              )),
-                              pw.Expanded(flex: 13, child: pw.Padding(
-                                padding: const pw.EdgeInsets.symmetric(horizontal: 2, vertical: 2),
-                                child: tx_('Amount(₹)', f: b, s: fs - 3.5, a: pw.TextAlign.center),
-                              )),
-                            ]),
-                          ]),
-                        )),
-                        // SGST group
-                        pw.Expanded(flex: 24, child: pw.Container(
-                          decoration: const pw.BoxDecoration(border: pw.Border(right: grey4)),
-                          child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.stretch, children: [
-                            pw.Container(
-                              decoration: const pw.BoxDecoration(border: pw.Border(bottom: grey4)),
-                              padding: const pw.EdgeInsets.symmetric(vertical: 2),
-                              child: pw.Center(child: tx_('SGST', f: b, s: fs - 3)),
-                            ),
-                            pw.Row(children: [
-                              pw.Expanded(flex: 11, child: pw.Container(
-                                decoration: const pw.BoxDecoration(border: pw.Border(right: grey4)),
-                                padding: const pw.EdgeInsets.symmetric(horizontal: 2, vertical: 2),
-                                child: tx_('Rate(%)', f: b, s: fs - 3.5, a: pw.TextAlign.center),
-                              )),
-                              pw.Expanded(flex: 13, child: pw.Padding(
-                                padding: const pw.EdgeInsets.symmetric(horizontal: 2, vertical: 2),
-                                child: tx_('Amount(₹)', f: b, s: fs - 3.5, a: pw.TextAlign.center),
-                              )),
-                            ]),
-                          ]),
-                        )),
-                        // Total Tax Amount
-                        pw.Expanded(flex: 15, child: pw.Container(
-                          alignment: pw.Alignment.center,
-                          padding: const pw.EdgeInsets.symmetric(horizontal: 2, vertical: 3),
-                          child: tx_('Total Tax\nAmount(₹)', f: b, s: fs - 3, a: pw.TextAlign.center),
-                        )),
-                      ]),
-                    ),
-                    // Data row
-                    _taxDataRow(
-                      hsn: '—',
-                      taxable: tx.subtotal.toStringAsFixed(2),
-                      cgstRate: '$halfRate%', cgstAmt: cgst.toStringAsFixed(2),
-                      sgstRate: '$halfRate%', sgstAmt: sgst.toStringAsFixed(2),
-                      total: tx.taxAmount.toStringAsFixed(2),
-                      font: r, fs: fs, grey4: grey4,
-                    ),
-                    // TOTAL row
-                    _taxDataRow(
-                      hsn: 'TOTAL',
-                      taxable: tx.subtotal.toStringAsFixed(2),
-                      cgstRate: '', cgstAmt: cgst.toStringAsFixed(2),
-                      sgstRate: '', sgstAmt: sgst.toStringAsFixed(2),
-                      total: tx.taxAmount.toStringAsFixed(2),
-                      font: b, fs: fs, grey4: grey4, bg: PdfColors.grey100,
-                    ),
-                  ]),
-                ),
-                // Payment Mode below tax table
-                pw.Container(
-                  decoration: const pw.BoxDecoration(border: pw.Border(top: grey4)),
-                  padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                  child: pw.RichText(text: pw.TextSpan(children: [
+              // Left: Payment Mode + optional UPI QR
+              pw.Container(
+                decoration: const pw.BoxDecoration(border: pw.Border(top: grey4)),
+                padding: const pw.EdgeInsets.all(8),
+                child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+                  pw.RichText(text: pw.TextSpan(children: [
                     pw.TextSpan(text: 'Payment Mode: ', style: pw.TextStyle(font: r, fontSize: fs - 1, color: PdfColors.grey700)),
-                    pw.TextSpan(text: tx.paymentMethod, style: pw.TextStyle(font: b, fontSize: fs - 1)),
+                    pw.TextSpan(text: tx.paymentMethod.toUpperCase(), style: pw.TextStyle(font: b, fontSize: fs - 1)),
                   ])),
-                ),
-              ]),
+                  if (storeUpiId.isNotEmpty) ...[
+                    pw.SizedBox(height: 6),
+                    pw.BarcodeWidget(
+                      barcode: pw.Barcode.qrCode(),
+                      data: 'upi://pay?pa=${Uri.encodeComponent(storeUpiId)}&pn=${Uri.encodeComponent(storeName)}&cu=INR',
+                      width: 60, height: 60, drawText: false,
+                    ),
+                    pw.SizedBox(height: 3),
+                    tx_(storeUpiId, s: fs - 2, c: PdfColors.grey600),
+                  ],
+                ]),
+              ),
               // Right: Totals breakdown
               pw.Padding(
                 padding: const pw.EdgeInsets.all(8),
                 child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.stretch, children: [
-                  totRow('Sub Total', tx.subtotal.toStringAsFixed(2)),
+                  totRow('Sub Total', '$currencySymbol ${tx.subtotal.toStringAsFixed(2)}'),
                   if (tx.discountAmount > 0)
-                    totRow('Discount', tx.discountAmount.toStringAsFixed(2), vc: PdfColors.green800),
-                  totRow('Tax ($taxRate%)', tx.taxAmount.toStringAsFixed(2)),
+                    totRow('Discount', '$currencySymbol ${tx.discountAmount.toStringAsFixed(2)}', vc: PdfColors.green800),
+                  totRow('Tax ($taxRate%)', '$currencySymbol ${tx.taxAmount.toStringAsFixed(2)}'),
                   pw.Divider(thickness: 0.5, color: PdfColors.grey400),
                   totRow('Total', '$currencySymbol ${tx.total.toStringAsFixed(2)}',
                       bold: true, fs2: fs + 0.5),
@@ -1200,8 +1145,8 @@ class ReceiptPrinter {
                   pw.SizedBox(height: 2),
                   tx_(_numberToWords(tx.total), s: fs - 2.5, c: PdfColors.grey600),
                   pw.SizedBox(height: 4),
-                  totRow('Received', tx.total.toStringAsFixed(2)),
-                  totRow('Balance', '0.00'),
+                  totRow('Received', '$currencySymbol ${tx.total.toStringAsFixed(2)}'),
+                  totRow('Balance', '$currencySymbol 0.00'),
                   if (tx.discountAmount > 0)
                     totRow('You Saved', '$currencySymbol ${tx.discountAmount.toStringAsFixed(2)}',
                         bold: true, vc: PdfColors.green800),
@@ -1210,7 +1155,7 @@ class ReceiptPrinter {
             ])],
           ),
 
-          // ── Footer: Description+Bank (left) | Terms+Signatory (right) ──
+          // ── Footer: Description+Bank+CustomerSig (left) | Terms+Signatory (right) ──
           pw.Table(
             border: const pw.TableBorder(verticalInside: grey4),
             columnWidths: const {0: pw.FlexColumnWidth(55), 1: pw.FlexColumnWidth(45)},
@@ -1226,32 +1171,15 @@ class ReceiptPrinter {
                   child: tx_(receiptFooter.isNotEmpty ? receiptFooter : 'Sale Description',
                       s: fs - 1.5, c: PdfColors.grey600),
                 ),
+                // Customer Signature
                 pw.Container(
                   decoration: const pw.BoxDecoration(border: pw.Border(top: grey4)),
-                  padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                  child: tx_('Bank Details:', f: b, s: fs - 0.5),
+                  padding: const pw.EdgeInsets.fromLTRB(8, 5, 8, 0),
+                  child: tx_('Customer Signature:', f: b, s: fs - 0.5),
                 ),
                 pw.Padding(
-                  padding: const pw.EdgeInsets.all(8),
-                  child: pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-                    pw.Container(
-                      width: 38, height: 38,
-                      decoration: pw.BoxDecoration(
-                        color: PdfColors.grey300,
-                        border: pw.Border.all(color: PdfColors.grey500, width: 0.5),
-                      ),
-                      child: pw.Center(child: tx_('QR', s: 7, c: PdfColors.grey600)),
-                    ),
-                    pw.SizedBox(width: 8),
-                    pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-                      pw.SizedBox(height: 2),
-                      tx_('Bank Name: —', s: fs - 2, c: PdfColors.grey700),
-                      pw.SizedBox(height: 2),
-                      tx_('Account No.: —', s: fs - 2, c: PdfColors.grey700),
-                      pw.SizedBox(height: 2),
-                      tx_('IFSC Code: —', s: fs - 2, c: PdfColors.grey700),
-                    ]),
-                  ]),
+                  padding: const pw.EdgeInsets.fromLTRB(8, 36, 8, 10),
+                  child: pw.Container(height: 0.5, color: PdfColors.grey400),
                 ),
               ]),
               pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.stretch, children: [
@@ -1268,21 +1196,16 @@ class ReceiptPrinter {
                 pw.Container(
                   decoration: const pw.BoxDecoration(border: pw.Border(top: grey4)),
                   padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                  child: tx_('For: ${storeName.isNotEmpty ? storeName : "Company"}:', f: b, s: fs - 0.5),
+                  child: tx_('For: ${storeName.isNotEmpty ? storeName : "Company"}', f: b, s: fs - 0.5),
                 ),
+                // Authorized Signatory — blank space, no image box
                 pw.Padding(
-                  padding: const pw.EdgeInsets.all(8),
+                  padding: const pw.EdgeInsets.fromLTRB(8, 32, 8, 6),
                   child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.center, children: [
-                    pw.Container(
-                      width: 54, height: 46,
-                      decoration: pw.BoxDecoration(
-                        color: PdfColors.grey200,
-                        border: pw.Border.all(color: PdfColors.grey400, width: 0.5),
-                      ),
-                      child: pw.Center(child: tx_('Image', s: 7, c: PdfColors.grey500)),
-                    ),
-                    pw.SizedBox(height: 4),
-                    tx_('Authorized Signatory', s: fs - 1.5, c: PdfColors.grey600),
+                    pw.Container(height: 0.5, color: PdfColors.grey400),
+                    pw.SizedBox(height: 3),
+                    tx_('Authorized Signatory', s: fs - 1.5, c: PdfColors.grey600,
+                        a: pw.TextAlign.center),
                   ]),
                 ),
               ]),
@@ -1354,7 +1277,7 @@ class ReceiptPrinter {
           final itemRows = [
             ...tx.items.asMap().entries.map((e) => pw.TableRow(children: [
               pad(t('${e.key + 1}', a: pw.TextAlign.center)),
-              pad(t(e.value.productName, s: fs - 0.5)),
+              pad(t(_itemLabel(e.value), s: fs - 0.5)),
               pad(t('—', a: pw.TextAlign.center)),
               pad(t('${e.value.quantity}', a: pw.TextAlign.center)),
               pad(t('$currencySymbol${e.value.price.toStringAsFixed(2)}', a: pw.TextAlign.right)),
@@ -1812,7 +1735,7 @@ class ReceiptPrinter {
       final item = e.value;
       return pw.TableRow(children: [
         cell(t('${e.key + 1}', a: pw.TextAlign.center, s: fs - 1)),
-        cell(t(item.productName, f: b, s: fs - 1)),
+        cell(t(_itemLabel(item), f: b, s: fs - 1)),
         cell(t('—', a: pw.TextAlign.center, s: fs - 1)),
         cell(t('${item.quantity}', a: pw.TextAlign.center, s: fs - 1)),
         cell(t('—', a: pw.TextAlign.center, s: fs - 1)),
@@ -2228,7 +2151,7 @@ class ReceiptPrinter {
     return buf.toString().trim();
   }
 
-  // ── Modern 4 — exact replica of user's sample invoice ────────────────────
+  // ── Modern 4 — exact replica of Metro Gadgetz invoice ───────────────────
   static Future<Uint8List> _buildModern4Pdf(
     TransactionRecord tx, {
     required String storeName,
@@ -2242,10 +2165,11 @@ class ReceiptPrinter {
     required String currencySymbol,
     String storeTerms = '',
     String logoPath = '',
+    String storeUpiId = '',
   }) async {
     await preWarm();
-    final r = _regular!;
-    final b = _bold!;
+    final r = _poppinsRegular ?? _regular!;
+    final b = _poppinsBold   ?? _bold!;
 
     pw.ImageProvider? logoImage;
     if (logoPath.isNotEmpty) {
@@ -2255,242 +2179,238 @@ class ReceiptPrinter {
       } catch (_) {}
     }
 
-    const fs = 8.5;
-    final totalQty  = tx.items.fold<int>(0, (s, i) => s + i.quantity);
+    const fs = 10.0;
     final invoiceNo = tx.id.length >= 6 ? tx.id.substring(0, 6).toUpperCase() : tx.id.toUpperCase();
-    final dateStr   = () {
+    final dateStr = () {
       final d = tx.createdAt;
-      return '${d.day.toString().padLeft(2,'0')}-${d.month.toString().padLeft(2,'0')}-${d.year}';
+      return '${d.day.toString().padLeft(2,'0')}/${d.month.toString().padLeft(2,'0')}/${d.year}';
     }();
 
-    final amtWords  = _numberToWords(tx.total);
-
-    const line4   = pw.BorderSide(color: PdfColors.grey400, width: 0.4);
-    const line7   = pw.BorderSide(color: PdfColors.grey700, width: 0.7);
-    const divB    = pw.BoxDecoration(border: pw.Border(bottom: line4));
-    const divBold = pw.BoxDecoration(border: pw.Border(bottom: line7));
-
-    // Helpers
-    pw.Widget tx_(String v, {pw.Font? f, double? s, PdfColor? c,
-        pw.TextAlign a = pw.TextAlign.left, int? ml}) =>
-        pw.Text(v, maxLines: ml, textAlign: a,
-            style: pw.TextStyle(font: f ?? r, fontSize: s ?? fs, color: c));
-
-    pw.Widget pad(pw.Widget w, [pw.EdgeInsets? e]) =>
-        pw.Padding(padding: e ?? const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 4), child: w);
-
-    // Format currency
     String fmt(double v) {
       final parts = v.toStringAsFixed(2).split('.');
       final intStr = parts[0];
-      final buf2 = StringBuffer();
+      final buf = StringBuffer();
       for (int i = 0; i < intStr.length; i++) {
-        if (i > 0 && (intStr.length - i) % 3 == 0) buf2.write(',');
-        buf2.write(intStr[i]);
+        if (i > 0 && (intStr.length - i) % 3 == 0) buf.write(',');
+        buf.write(intStr[i]);
       }
-      return '$currencySymbol $buf2.${parts[1]}';
+      return '$currencySymbol$buf.${parts[1]}';
     }
 
-    // Totals right-panel row
-    pw.Widget totRow(String lbl, String val, {bool bold = false}) =>
-        pw.Container(
-          decoration: divB,
-          padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-          child: pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
-            tx_(lbl, f: bold ? b : r, s: fs - 0.5, c: bold ? null : PdfColors.grey700),
-            tx_(val, f: bold ? b : r, s: fs - 0.5),
-          ]),
-        );
+    pw.Widget tx_(String v, {pw.Font? f, double? s, PdfColor? c,
+        pw.TextAlign a = pw.TextAlign.left}) =>
+        pw.Text(v, textAlign: a,
+            style: pw.TextStyle(font: f ?? r, fontSize: s ?? fs, color: c));
+
+    pw.Widget cell(pw.Widget w, [pw.EdgeInsets? e]) => pw.Padding(
+        padding: e ?? const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: w);
 
     final doc = pw.Document();
     doc.addPage(pw.Page(
       pageFormat: PdfPageFormat.a4,
-      margin: const pw.EdgeInsets.fromLTRB(22, 20, 22, 20),
+      margin: const pw.EdgeInsets.all(0),
       build: (_) => pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.stretch, children: [
 
-        // ── 1. Header: company left, logo right ──────────────────────────────
+        // ── 1. Black header ───────────────────────────────────────────────────
         pw.Container(
-          decoration: divBold,
-          padding: const pw.EdgeInsets.only(bottom: 8),
+          color: PdfColors.black,
+          padding: const pw.EdgeInsets.symmetric(horizontal: 28, vertical: 18),
+          child: pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.center, children: [
+            if (logoImage != null)
+              pw.Container(width: 80, height: 80,
+                  child: pw.Image(logoImage, fit: pw.BoxFit.contain))
+            else
+              pw.Container(
+                width: 80, height: 80,
+                decoration: pw.BoxDecoration(
+                    border: pw.Border.all(color: PdfColors.grey600, width: 0.5)),
+                child: pw.Center(child: tx_(
+                    storeName.isNotEmpty ? storeName.substring(0, 1) : 'M',
+                    f: b, s: 28, c: PdfColors.white)),
+              ),
+            pw.SizedBox(width: 20),
+            pw.Expanded(child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
+              if (storeAddress.isNotEmpty)
+                tx_(storeAddress, s: fs - 1, c: PdfColors.white, a: pw.TextAlign.right),
+              if (storePhone.isNotEmpty) ...[
+                pw.SizedBox(height: 2),
+                tx_(storePhone, s: fs - 1, c: PdfColors.white, a: pw.TextAlign.right),
+              ],
+              if (storeEmail.isNotEmpty) ...[
+                pw.SizedBox(height: 2),
+                tx_(storeEmail, s: fs - 1, c: PdfColors.white, a: pw.TextAlign.right),
+              ],
+            ])),
+          ]),
+        ),
+
+        // ── 2. Bill To (left) | Total Due (right) ────────────────────────────
+        pw.Padding(
+          padding: const pw.EdgeInsets.fromLTRB(28, 20, 28, 14),
           child: pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
             pw.Expanded(child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-              tx_(storeName.isNotEmpty ? storeName : 'Company', f: b, s: fs + 4),
+              tx_('invoice to :', s: fs - 2, c: PdfColors.grey600),
+              pw.SizedBox(height: 4),
+              tx_(tx.customerName?.isNotEmpty == true ? tx.customerName! : 'Walk-in Customer',
+                  f: b, s: fs + 10),
+              if (tx.customerPhone?.isNotEmpty == true) ...[
+                pw.SizedBox(height: 3),
+                tx_(tx.customerPhone!, s: fs, c: PdfColors.grey700),
+              ],
               pw.SizedBox(height: 3),
-              if (storeAddress.isNotEmpty) ...[
-                tx_(storeAddress, s: fs - 1, c: PdfColors.grey700),
-                pw.SizedBox(height: 2),
-              ],
-              if (storePhone.isNotEmpty) tx_('Phone no. : $storePhone', s: fs - 1, c: PdfColors.grey700),
-              if (storeEmail.isNotEmpty) tx_('Email : $storeEmail', s: fs - 1, c: PdfColors.grey700),
-              if (storeGstin.isNotEmpty) tx_('GSTIN : $storeGstin', s: fs - 1, c: PdfColors.grey700),
+              tx_('Invoice no : $invoiceNo', s: fs, c: PdfColors.grey700),
             ])),
-            pw.SizedBox(width: 12),
-            if (logoImage != null)
+            pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
+              tx_('Total due', s: fs - 1, c: PdfColors.grey600, a: pw.TextAlign.right),
+              pw.SizedBox(height: 4),
+              tx_(fmt(tx.total), f: b, s: fs + 13, a: pw.TextAlign.right),
               pw.Container(
-                width: 60, height: 60,
-                child: pw.Image(logoImage, fit: pw.BoxFit.contain),
-              )
-            else
-              pw.SizedBox(width: 60, height: 60),
-          ]),
-        ),
-
-        pw.SizedBox(height: 6),
-
-        // ── 2. "Tax Invoice" title ────────────────────────────────────────────
-        pw.Center(child: tx_('Tax Invoice', f: b, s: fs + 3.5, c: PdfColors.blue800)),
-
-        pw.SizedBox(height: 6),
-
-        // ── 3. Bill To | Ship To | Invoice Details ───────────────────────────
-        pw.Container(
-          decoration: pw.BoxDecoration(border: pw.Border.all(color: PdfColors.grey400, width: 0.4)),
-          child: pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-            // Bill To
-            pw.Expanded(flex: 40, child: pw.Container(
-              decoration: const pw.BoxDecoration(border: pw.Border(right: line4)),
-              padding: const pw.EdgeInsets.all(6),
-              child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-                tx_('Bill To', f: b, s: fs - 0.5),
-                pw.SizedBox(height: 4),
-                tx_(tx.customerName?.isNotEmpty == true ? tx.customerName! : 'Walk-in Customer', f: b, s: fs - 0.5),
-                if (tx.customerPhone?.isNotEmpty == true) ...[
-                  pw.SizedBox(height: 2),
-                  tx_('Contact No. : ${tx.customerPhone}', s: fs - 1.5, c: PdfColors.grey700),
-                ],
-              ]),
-            )),
-            // Ship To
-            pw.Expanded(flex: 30, child: pw.Container(
-              decoration: const pw.BoxDecoration(border: pw.Border(right: line4)),
-              padding: const pw.EdgeInsets.all(6),
-              child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-                tx_('Ship To', f: b, s: fs - 0.5),
-                pw.SizedBox(height: 4),
-                tx_(tx.customerName?.isNotEmpty == true ? tx.customerName! : '—', s: fs - 1.5, c: PdfColors.grey700),
-              ]),
-            )),
-            // Invoice Details
-            pw.Expanded(flex: 30, child: pw.Padding(
-              padding: const pw.EdgeInsets.all(6),
-              child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
-                tx_('Invoice Details', f: b, s: fs - 0.5, a: pw.TextAlign.right),
-                pw.SizedBox(height: 4),
-                tx_('Invoice No. : $invoiceNo', s: fs - 1.5, c: PdfColors.grey700, a: pw.TextAlign.right),
-                pw.SizedBox(height: 2),
-                tx_('Date : $dateStr', s: fs - 1.5, c: PdfColors.grey700, a: pw.TextAlign.right),
-              ]),
-            )),
-          ]),
-        ),
-
-        pw.SizedBox(height: 4),
-
-        // ── 4. Items table ────────────────────────────────────────────────────
-        pw.Table(
-          border: pw.TableBorder.all(color: PdfColors.grey400, width: 0.4),
-          columnWidths: const {
-            0: pw.FixedColumnWidth(14),
-            1: pw.FlexColumnWidth(3.5),
-            2: pw.FixedColumnWidth(42),
-            3: pw.FixedColumnWidth(38),
-            4: pw.FixedColumnWidth(28),
-            5: pw.FixedColumnWidth(66),
-            6: pw.FixedColumnWidth(60),
-          },
-          children: [
-            // Header row — dark background, white text
-            pw.TableRow(
-              decoration: const pw.BoxDecoration(color: PdfColors.grey800),
-              children: [
-                for (final h in [
-                  ('#',              pw.TextAlign.center),
-                  ('Item name',      pw.TextAlign.left),
-                  ('HSN/ SAC',       pw.TextAlign.center),
-                  ('Quantity',       pw.TextAlign.center),
-                  ('Unit',           pw.TextAlign.center),
-                  ('Price/ Unit',    pw.TextAlign.right),
-                  ('Amount',         pw.TextAlign.right),
-                ])
-                  pad(tx_(h.$1, f: b, s: fs - 2, c: PdfColors.white, a: h.$2),
-                      const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 5)),
-              ],
-            ),
-            // Item rows
-            ...tx.items.asMap().entries.map((e) {
-              final item = e.value;
-              return pw.TableRow(children: [
-                pad(tx_('${e.key + 1}', a: pw.TextAlign.center, s: fs - 1)),
-                pad(tx_(item.productName, f: b, s: fs - 1)),
-                pad(tx_('—', a: pw.TextAlign.center, s: fs - 1, c: PdfColors.grey600)),
-                pad(tx_('${item.quantity}', a: pw.TextAlign.center, s: fs - 1)),
-                pad(tx_('—', a: pw.TextAlign.center, s: fs - 1, c: PdfColors.grey600)),
-                pad(tx_(fmt(item.price), a: pw.TextAlign.right, s: fs - 1)),
-                pad(tx_(fmt(item.total), f: b, a: pw.TextAlign.right, s: fs - 1)),
-              ]);
-            }),
-            // Total row
-            pw.TableRow(
-              decoration: const pw.BoxDecoration(color: PdfColors.grey100),
-              children: [
-                pw.SizedBox(),
-                pad(tx_('Total', f: b, s: fs - 1)),
-                pw.SizedBox(),
-                pad(tx_('$totalQty', f: b, a: pw.TextAlign.center, s: fs - 1)),
-                pw.SizedBox(),
-                pw.SizedBox(),
-                pad(tx_(fmt(tx.total), f: b, a: pw.TextAlign.right, s: fs - 1)),
-              ],
-            ),
-          ],
-        ),
-
-        pw.SizedBox(height: 4),
-
-        // ── 5. Bottom: words+terms (left) | totals (right) ───────────────────
-        pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-          // Left
-          pw.Expanded(flex: 55, child: pw.Padding(
-            padding: const pw.EdgeInsets.only(right: 8),
-            child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-              pw.RichText(text: pw.TextSpan(children: [
-                pw.TextSpan(text: 'Invoice Amount in Words: ', style: pw.TextStyle(font: b, fontSize: fs - 1)),
-                pw.TextSpan(text: '$amtWords Rupees only', style: pw.TextStyle(font: r, fontSize: fs - 1, color: PdfColors.grey700)),
-              ])),
-              pw.SizedBox(height: 6),
-              pw.RichText(text: pw.TextSpan(children: [
-                pw.TextSpan(text: 'Payment mode: ', style: pw.TextStyle(font: b, fontSize: fs - 1)),
-                pw.TextSpan(text: tx.paymentMethod.isNotEmpty ? '${tx.paymentMethod[0].toUpperCase()}${tx.paymentMethod.substring(1)}' : '', style: pw.TextStyle(font: r, fontSize: fs - 1, color: PdfColors.grey700)),
-              ])),
-              if (storeTerms.isNotEmpty) ...[
-                pw.SizedBox(height: 6),
-                pw.RichText(text: pw.TextSpan(children: [
-                  pw.TextSpan(text: 'Terms and Conditions  ', style: pw.TextStyle(font: b, fontSize: fs - 1)),
-                  pw.TextSpan(text: storeTerms, style: pw.TextStyle(font: r, fontSize: fs - 1.5, color: PdfColors.grey700)),
-                ])),
-              ],
+                  margin: const pw.EdgeInsets.symmetric(vertical: 5),
+                  height: 1.5, width: 150, color: PdfColors.black),
+              pw.SizedBox(height: 4),
+              tx_('Date : $dateStr', s: fs, c: PdfColors.grey700, a: pw.TextAlign.right),
             ]),
-          )),
-          // Right: totals
-          pw.Expanded(flex: 45, child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.stretch, children: [
-            totRow('Sub Total', fmt(tx.subtotal)),
-            if (tx.discountAmount > 0) totRow('Discount', '- ${fmt(tx.discountAmount)}'),
-            if (tx.taxAmount > 0)      totRow(taxLabel.isNotEmpty ? taxLabel : 'Tax', fmt(tx.taxAmount)),
-            totRow('Total',    fmt(tx.total),    bold: true),
-            totRow('Received', fmt(tx.total)),
-            totRow('Balance',  fmt(0.0)),
-          ])),
-        ]),
+          ]),
+        ),
 
-        pw.Spacer(),
+        // ── 3. Items table ────────────────────────────────────────────────────
+        pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 28),
+          child: pw.Table(
+            columnWidths: const {
+              0: pw.FlexColumnWidth(4.0),
+              1: pw.FixedColumnWidth(60),
+              2: pw.FixedColumnWidth(80),
+              3: pw.FixedColumnWidth(80),
+            },
+            children: [
+              pw.TableRow(
+                decoration: const pw.BoxDecoration(color: PdfColors.black),
+                children: [
+                  for (final h in [
+                    ('Description', pw.TextAlign.left),
+                    ('Qty',         pw.TextAlign.center),
+                    ('Price',       pw.TextAlign.right),
+                    ('Total',       pw.TextAlign.right),
+                  ])
+                    cell(tx_(h.$1, f: b, s: fs, c: PdfColors.white, a: h.$2),
+                        const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 9)),
+                ],
+              ),
+              ...tx.items.asMap().entries.map((e) {
+                final item = e.value;
+                final bg = e.key.isEven ? PdfColors.white : PdfColors.grey100;
+                return pw.TableRow(
+                  decoration: pw.BoxDecoration(color: bg),
+                  children: [
+                    cell(tx_(_itemLabel(item), s: fs),
+                        const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 9)),
+                    cell(tx_('${item.quantity}', s: fs, a: pw.TextAlign.center),
+                        const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 9)),
+                    cell(tx_(fmt(item.price), s: fs, a: pw.TextAlign.right),
+                        const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 9)),
+                    cell(tx_(fmt(item.total), f: b, s: fs, a: pw.TextAlign.right),
+                        const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 9)),
+                  ],
+                );
+              }),
+            ],
+          ),
+        ),
 
-        // ── 6. Footer: authorized signatory (right) ───────────────────────────
-        pw.Align(
-          alignment: pw.Alignment.centerRight,
-          child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.center, children: [
-            tx_('For : ${storeName.isNotEmpty ? storeName : 'Company'}', s: fs - 1, c: PdfColors.grey700),
-            pw.SizedBox(height: 36),
-            tx_('Authorized Signatory', f: b, s: fs - 0.5),
+        // ── Thin divider after items ──────────────────────────────────────────
+        pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 28),
+          child: pw.Container(height: 0.8, color: PdfColors.grey400),
+        ),
+        pw.SizedBox(height: 14),
+
+        // ── 4a. Sub-total + Tax on RIGHT only ─────────────────────────────────
+        pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 28),
+          child: pw.Row(children: [
+            pw.Expanded(child: pw.SizedBox()),
+            pw.SizedBox(
+              width: 195,
+              child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.stretch, children: [
+                _modernTotRow('Sub-total :', fmt(tx.subtotal), r, b, fs, bold: false),
+                if (tx.discountAmount > 0)
+                  _modernTotRow('Discount :', '- ${fmt(tx.discountAmount)}', r, b, fs, bold: false),
+                _modernTotRow(
+                    tx.taxAmount > 0 ? '${taxLabel.isNotEmpty ? taxLabel : 'Tax'} :' : 'Tax :',
+                    tx.taxAmount > 0 ? fmt(tx.taxAmount) : fmt(0),
+                    r, b, fs, bold: false),
+              ]),
+            ),
+          ]),
+        ),
+
+        // ── 4b. "UPI Method:" (left) | Total black box (right) ───────────────
+        pw.Padding(
+          padding: const pw.EdgeInsets.fromLTRB(28, 6, 28, 0),
+          child: pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.center, children: [
+            pw.Expanded(child: tx_('UPI Method :', f: b, s: fs + 1)),
+            pw.SizedBox(
+              width: 195,
+              child: pw.Container(
+                color: PdfColors.black,
+                padding: const pw.EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                child: pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
+                  tx_('Total :', f: b, s: fs + 1, c: PdfColors.white),
+                  tx_(fmt(tx.total), f: b, s: fs + 1, c: PdfColors.white, a: pw.TextAlign.right),
+                ]),
+              ),
+            ),
+          ]),
+        ),
+
+        // ── 4c. QR code below UPI label ───────────────────────────────────────
+        pw.Padding(
+          padding: const pw.EdgeInsets.fromLTRB(28, 8, 28, 0),
+          child: storeUpiId.isNotEmpty
+              ? pw.BarcodeWidget(
+                  barcode: pw.Barcode.qrCode(),
+                  data: 'upi://pay?pa=${Uri.encodeComponent(storeUpiId)}&pn=${Uri.encodeComponent(storeName)}&cu=INR',
+                  width: 65, height: 65, drawText: false,
+                )
+              : pw.Container(
+                  width: 58, height: 58,
+                  decoration: pw.BoxDecoration(
+                      border: pw.Border.all(color: PdfColors.grey400, width: 0.5)),
+                  child: pw.Center(child: tx_('QR', s: 9, c: PdfColors.grey600)),
+                ),
+        ),
+
+        // ── 4d. Thanks For Choosing ───────────────────────────────────────────
+        pw.Padding(
+          padding: const pw.EdgeInsets.fromLTRB(28, 16, 28, 0),
+          child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+            tx_('Thanks For Choosing', f: b, s: fs + 6),
+            tx_('${storeName.isNotEmpty ? storeName : 'Us'}!', f: b, s: fs + 6),
+          ]),
+        ),
+
+        pw.Expanded(child: pw.SizedBox()),
+
+        // ── 5. Footer: Terms (left) | Signatory (right) ──────────────────────
+        pw.Padding(
+          padding: const pw.EdgeInsets.fromLTRB(28, 10, 28, 28),
+          child: pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
+            pw.Expanded(child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+              tx_('Terms and Conditions', f: b, s: fs),
+              pw.SizedBox(height: 5),
+              tx_(storeTerms.isNotEmpty ? storeTerms : receiptFooter,
+                  s: fs - 2, c: PdfColors.grey600),
+            ])),
+            pw.SizedBox(width: 30),
+            pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.center, children: [
+              pw.Container(width: 130, height: 0.8, color: PdfColors.black),
+              pw.SizedBox(height: 5),
+              tx_(storeName.isNotEmpty ? storeName : 'Authorized Signatory',
+                  f: b, s: fs, a: pw.TextAlign.center),
+              tx_('Owner', s: fs - 1.5, c: PdfColors.grey600, a: pw.TextAlign.center),
+            ]),
           ]),
         ),
       ]),
@@ -2498,6 +2418,18 @@ class ReceiptPrinter {
 
     return doc.save();
   }
+
+  static pw.Widget _modernTotRow(String lbl, String val,
+      pw.Font r, pw.Font b, double fs, {required bool bold}) =>
+      pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        child: pw.Row(mainAxisAlignment: pw.MainAxisAlignment.spaceBetween, children: [
+          pw.Text(lbl, style: pw.TextStyle(font: bold ? b : r, fontSize: fs - 0.5,
+              color: bold ? PdfColors.black : PdfColors.grey700)),
+          pw.SizedBox(width: 40),
+          pw.Text(val, style: pw.TextStyle(font: bold ? b : r, fontSize: fs - 0.5)),
+        ]),
+      );
 
   // ── Landscape Tax Invoice ─────────────────────────────────────────────────
   static Future<Uint8List> _buildLandscapePdf(
@@ -2560,7 +2492,7 @@ class ReceiptPrinter {
       final item = e.value;
       return pw.TableRow(children: [
         pad(tx_('${e.key + 1}', a: pw.TextAlign.center, s: fs - 1)),
-        pad(tx_(item.productName, f: b, s: fs - 1)),
+        pad(tx_(_itemLabel(item), f: b, s: fs - 1)),
         pad(tx_('—', a: pw.TextAlign.center, s: fs - 1)),
         pad(tx_('${item.quantity}', a: pw.TextAlign.center, s: fs - 1)),
         pad(tx_('—', a: pw.TextAlign.center, s: fs - 1)),
@@ -2838,6 +2770,7 @@ class ReceiptPrinter {
     required String currencySymbol,
     String storeTerms = '',
     String logoPath = '',
+    String docType = 'Invoice',
   }) async {
     await preWarm();
     final r = _regular!;
@@ -2894,7 +2827,7 @@ class ReceiptPrinter {
       final item = e.value;
       return pw.TableRow(children: [
         pad(tx_('${e.key + 1}', a: pw.TextAlign.center, s: fs - 1)),
-        pad(tx_(item.productName, f: b, s: fs - 1)),
+        pad(tx_(_itemLabel(item), f: b, s: fs - 1)),
         pad(tx_('—', a: pw.TextAlign.center, s: fs - 1)),
         pad(tx_('${item.quantity}', a: pw.TextAlign.center, s: fs - 1)),
         pad(tx_('—', a: pw.TextAlign.center, s: fs - 1)),
@@ -3148,6 +3081,7 @@ class ReceiptPrinter {
     required String currencySymbol,
     String storeTerms = '',
     String logoPath = '',
+    String docType = 'Invoice',
   }) async {
     await preWarm();
     final r = _regular!;
@@ -3204,7 +3138,7 @@ class ReceiptPrinter {
       final item = e.value;
       return pw.TableRow(children: [
         pad(tx_('${e.key + 1}', a: pw.TextAlign.center, s: fs - 1)),
-        pad(tx_(item.productName, s: fs - 1)),
+        pad(tx_(_itemLabel(item), s: fs - 1)),
         pad(tx_(fmtAmt(item.price), a: pw.TextAlign.right, s: fs - 1)),
         pad(tx_('${item.quantity}', a: pw.TextAlign.center, s: fs - 1)),
         pad(tx_(fmtAmt(item.total), f: b, a: pw.TextAlign.right, s: fs - 1)),
@@ -3246,7 +3180,7 @@ class ReceiptPrinter {
           ])),
           // INVOICE label + date
           pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.end, children: [
-            tx_('INVOICE', f: b, s: fs + 12, c: darkColor),
+            tx_(docType.toUpperCase(), f: b, s: fs + 12, c: darkColor),
             pw.SizedBox(height: 4),
             tx_('DATE. $dateStr', s: fs - 1, c: PdfColors.grey600),
           ]),

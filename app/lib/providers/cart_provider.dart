@@ -69,6 +69,14 @@ class CartProvider extends ChangeNotifier {
     }
   }
 
+  void setQuantity(String productId, int qty, {int stock = 999999}) {
+    final i = _items.indexWhere((e) => e.product.id == productId);
+    if (i >= 0) {
+      _items[i].quantity = qty.clamp(1, stock);
+      notifyListeners();
+    }
+  }
+
   void removeItem(String productId) {
     _items.removeWhere((e) => e.product.id == productId);
     notifyListeners();
@@ -85,9 +93,9 @@ class CartProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> checkout() async {
+  Future<void> checkout({String? invoiceNumber, String? transactionId}) async {
     final record = TransactionRecord(
-      id: const Uuid().v4(),
+      id: transactionId ?? const Uuid().v4(),
       customerName: customerName.isEmpty ? null : customerName,
       customerPhone: customerPhone.isEmpty ? null : customerPhone,
       items: _items.map((i) => TransactionItem(
@@ -95,6 +103,7 @@ class CartProvider extends ChangeNotifier {
         productName: i.product.name,
         price: i.product.price,
         quantity: i.quantity,
+        description: i.product.description,
       )).toList(),
       subtotal: subtotal,
       discountAmount: discountAmount,
@@ -103,6 +112,7 @@ class CartProvider extends ChangeNotifier {
       paymentMethod: paymentMethod.name,
       createdAt: DateTime.now(),
       synced: false,
+      invoiceNumber: invoiceNumber,
     );
     await LocalDbService.insertTransaction(record);
     await ConnectivityService.instance.refreshUnsyncedCount();

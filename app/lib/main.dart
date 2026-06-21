@@ -8,6 +8,7 @@ import 'screens/auth/reset_password_screen.dart';
 import 'screens/billing/billing_screen.dart';
 import 'services/connectivity_service.dart';
 import 'services/local_db_service.dart';
+import 'services/receipt_printer.dart';
 
 const _supabaseUrl = 'https://xawpxbhglzhaibmcpwho.supabase.co';
 const _supabaseAnonKey =
@@ -17,12 +18,20 @@ final _navigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Supabase.initialize(url: _supabaseUrl, anonKey: _supabaseAnonKey);
+  await Supabase.initialize(
+    url: _supabaseUrl,
+    anonKey: _supabaseAnonKey,
+    authOptions: const FlutterAuthClientOptions(
+      authFlowType: AuthFlowType.implicit,
+    ),
+  );
   final currentUser = Supabase.instance.client.auth.currentUser;
   if (currentUser != null) {
     await LocalDbService.initForUser(currentUser.id);
   }
   await ConnectivityService.instance.init();
+  // Pre-warm PDF fonts so the first print has no delay.
+  ReceiptPrinter.preWarm();
   // Fire-and-forget: app opens immediately with local data, cloud pull happens in background
   if (currentUser != null) {
     ConnectivityService.instance.pullFromCloud();
@@ -88,6 +97,15 @@ class _BillCatAppState extends State<BillCatApp> {
         theme: ThemeData(
           colorSchemeSeed: const Color(0xFF1A3A5F),
           useMaterial3: true,
+          scrollbarTheme: ScrollbarThemeData(
+            thickness: WidgetStateProperty.all(4),
+            radius: const Radius.circular(4),
+            thumbColor: WidgetStateProperty.all(const Color(0xFFCBD5E1)),
+            trackColor: WidgetStateProperty.all(Colors.transparent),
+            trackBorderColor: WidgetStateProperty.all(Colors.transparent),
+            crossAxisMargin: 2,
+            mainAxisMargin: 4,
+          ),
         ),
         home: Supabase.instance.client.auth.currentUser != null
             ? const BillingScreen()

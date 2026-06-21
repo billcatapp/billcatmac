@@ -5,12 +5,14 @@ class TransactionItem {
   final String productName;
   final double price;
   final int quantity;
+  final String description;
 
   const TransactionItem({
     required this.productId,
     required this.productName,
     required this.price,
     required this.quantity,
+    this.description = '',
   });
 
   double get total => price * quantity;
@@ -20,6 +22,7 @@ class TransactionItem {
     'productName': productName,
     'price': price,
     'quantity': quantity,
+    'description': description,
   };
 
   factory TransactionItem.fromMap(Map<String, dynamic> m) => TransactionItem(
@@ -27,6 +30,7 @@ class TransactionItem {
     productName: m['productName'] as String,
     price: (m['price'] as num).toDouble(),
     quantity: m['quantity'] as int,
+    description: (m['description'] as String?) ?? '',
   );
 }
 
@@ -42,6 +46,7 @@ class TransactionRecord {
   final String paymentMethod;
   final DateTime createdAt;
   final bool synced;
+  final String? invoiceNumber;
 
   const TransactionRecord({
     required this.id,
@@ -55,7 +60,9 @@ class TransactionRecord {
     required this.paymentMethod,
     required this.createdAt,
     this.synced = false,
+    this.invoiceNumber,
   });
+
 
   Map<String, dynamic> toMap() => {
     'id': id,
@@ -69,6 +76,7 @@ class TransactionRecord {
     'payment_method': paymentMethod,
     'created_at': createdAt.toIso8601String(),
     'synced': synced ? 1 : 0,
+    'invoice_number': invoiceNumber,
   };
 
   factory TransactionRecord.fromMap(Map<String, dynamic> m) {
@@ -85,6 +93,7 @@ class TransactionRecord {
       paymentMethod: m['payment_method'] as String,
       createdAt: DateTime.parse(m['created_at'] as String),
       synced: (m['synced'] as int) == 1,
+      invoiceNumber: m['invoice_number']?.toString(),
     );
   }
 }

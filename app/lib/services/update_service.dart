@@ -140,18 +140,27 @@ class UpdateService {
     final execPath = Platform.resolvedExecutable;
     final appPath = File(execPath).parent.parent.parent.path;
 
+    // Determine if app is in a system directory requiring admin rights
+    final appParent = File(appPath).parent.path;
+    final needsAdmin = appParent == '/Applications' || appParent.startsWith('/Applications/');
+
     // Write a detached script that waits for us to exit, then replaces the app
     final scriptPath = '${Directory.systemTemp.path}/billcat_updater_${DateTime.now().millisecondsSinceEpoch}.sh';
     final logPath = '${Directory.systemTemp.path}/billcat_update.log';
+
+    // Build the replace commands — use osascript admin prompt for /Applications
+    final replaceCmd = needsAdmin
+        ? 'osascript -e \'do shell script "rm -rf ${_escSh(appPath)} && cp -R ${_escSh(newAppPath)} ${_escSh(appParent)}/ && xattr -cr ${_escSh(appPath)}" with administrator privileges\''
+        : 'rm -rf ${_esc(appPath)} && cp -R ${_esc(newAppPath)} ${_esc(appPath)} && xattr -cr ${_esc(appPath)}';
+
     await File(scriptPath).writeAsString(
       '#!/bin/bash\n'
       'exec >>${_esc(logPath)} 2>&1\n'
       'echo "[\$(date)] updater started, waiting for BillCat to quit..."\n'
-      'for i in \$(seq 1 40); do sleep 0.5; pgrep -xq "BillCat" || break; done\n'
+      'for i in \$(seq 1 60); do sleep 0.5; pgrep -xq "BillCat" || break; done\n'
       'echo "[\$(date)] BillCat exited, replacing app..."\n'
-      'rm -rf ${_esc(appPath)}\n'
-      'cp -R ${_esc(newAppPath)} ${_esc(appPath)}\n'
-      'xattr -cr ${_esc(appPath)}\n'
+      '$replaceCmd\n'
+      'echo "[\$(date)] replace exit code: \$?"\n'
       'echo "[\$(date)] launching new app..."\n'
       'open ${_esc(appPath)}\n'
       'echo "[\$(date)] done"\n'
@@ -167,8 +176,12 @@ class UpdateService {
     exit(0);
   }
 
-  // Shell-escape a path by wrapping in single quotes
+  // Shell-escape a path by wrapping in single quotes (for bash)
   static String _esc(String path) => "'${path.replaceAll("'", "'\\''")}'";
+
+  // Escape a path for embedding inside an osascript do shell script string
+  // (backslash-escape double quotes and backslashes)
+  static String _escSh(String path) => path.replaceAll(r'\', r'\\').replaceAll('"', r'\"');
 }
 
 class UpdateInfo {

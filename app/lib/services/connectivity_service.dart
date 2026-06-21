@@ -22,6 +22,10 @@ class ConnectivityService extends ChangeNotifier {
   Future<void> init() async {
     final result = await Connectivity().checkConnectivity();
     _isOnline = _hasConnection(result);
+    if (_isOnline) {
+      // Delay to allow auth session to be restored before syncing
+      Future.delayed(const Duration(seconds: 3), _syncAll);
+    }
 
     _sub = Connectivity().onConnectivityChanged.listen((results) async {
       final online = _hasConnection(results);
@@ -106,7 +110,7 @@ class ConnectivityService extends ChangeNotifier {
               'payment_method': t.paymentMethod,
               'created_at': t.createdAt.toIso8601String(),
               'items': t.items.map((i) => i.toMap()).toList(),
-              'invoice_number': t.invoiceNumber,
+              'invoice_number': t.id.replaceAll('-', '').substring(0, 6).toUpperCase(),
             }).toList(),
           );
           for (final t in unsyncedTx) {
@@ -115,6 +119,33 @@ class ConnectivityService extends ChangeNotifier {
         } catch (e) {
           debugPrint('Transaction sync error: $e');
         }
+      }
+
+      // ── Backfill invoice_number for already-synced transactions ──────────
+      try {
+        final allTx = await LocalDbService.getTransactions();
+        final toBackfill = allTx.where((t) => t.invoiceNumber != null).toList();
+        if (toBackfill.isNotEmpty) {
+          await client.from('transactions').upsert(
+            toBackfill.map((t) => {
+              'id': t.id,
+              'user_id': userId,
+              'customer_name': t.customerName,
+              'customer_phone': t.customerPhone,
+              'subtotal': t.subtotal,
+              'discount_amount': t.discountAmount,
+              'tax_amount': t.taxAmount,
+              'total': t.total,
+              'payment_method': t.paymentMethod,
+              'created_at': t.createdAt.toIso8601String(),
+              'items': t.items.map((i) => i.toMap()).toList(),
+              'invoice_number': t.id.replaceAll('-', '').substring(0, 6).toUpperCase(),
+            }).toList(),
+          );
+          debugPrint('Backfilled invoice_number for ${toBackfill.length} transactions');
+        }
+      } catch (e) {
+        debugPrint('Invoice number backfill error: $e');
       }
 
       // ── Sync customers (batch) ───────────────────────────────────────────

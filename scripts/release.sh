@@ -10,17 +10,27 @@ GITHUB_REPO="billcatapp/billcat"
 APP_DIR="/Users/fouzehh/Documents/BillCat/app"
 RELEASES_DIR="/Users/fouzehh/Documents/BillCat/releases"
 
-# ── Prompt ───────────────────────────────────────────────────────────────────
+# ── Version: auto-increment patch, or pass as arg ────────────────────────────
+CURRENT_VERSION=$(grep "^version:" "$APP_DIR/pubspec.yaml" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+MAJOR=$(echo "$CURRENT_VERSION" | cut -d. -f1)
+MINOR=$(echo "$CURRENT_VERSION" | cut -d. -f2)
+PATCH=$(echo "$CURRENT_VERSION" | cut -d. -f3)
+
+VERSION="${1:-$MAJOR.$MINOR.$((PATCH + 1))}"
+NOTES="${2:-Bug fixes and improvements}"
+MANDATORY="${3:-false}"
+
 echo ""
 echo "╔══════════════════════════════╗"
 echo "║   BillCat Release Tool 🚀    ║"
 echo "╚══════════════════════════════╝"
 echo ""
-read -p "  New version  (e.g. 1.1.0) : " VERSION
-read -p "  Release notes             : " NOTES
-read -p "  Mandatory update? (y/n)   : " MAND_INPUT
-MANDATORY="false"
-[ "$MAND_INPUT" = "y" ] && MANDATORY="true"
+echo "  Version  : $VERSION  (was $CURRENT_VERSION)"
+echo "  Notes    : $NOTES"
+echo "  Mandatory: $MANDATORY"
+echo ""
+read -p "  Continue? (y/n) : " CONFIRM
+[ "$CONFIRM" != "y" ] && echo "Aborted." && exit 0
 
 ZIP_NAME="BillCat-$VERSION.zip"
 DMG_NAME="BillCat-$VERSION.dmg"
@@ -100,7 +110,7 @@ zip -qr "$ZIP_PATH" BillCat.app
 ZIP_SIZE=$(du -sh "$ZIP_PATH" | cut -f1)
 echo "        $ZIP_PATH ($ZIP_SIZE)  ← used for silent auto-updates"
 
-# ── 5. Upload zip to GitHub Releases ─────────────────────────────────────────
+# ── 5. Upload zip + DMG to GitHub Releases ───────────────────────────────────
 echo "[ 5/7 ] Uploading to GitHub Releases..."
 
 # Create the release
@@ -133,13 +143,30 @@ if [ -z "$ZIP_URL" ]; then
   echo "$ASSET_RESPONSE"
   exit 1
 fi
-echo "        Uploaded → $ZIP_URL"
+echo "        Uploaded zip → $ZIP_URL"
+
+# Upload the DMG asset
+DMG_RESPONSE=$(curl -s -X POST \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Content-Type: application/octet-stream" \
+  "$UPLOAD_URL?name=$DMG_NAME" \
+  --data-binary @"$DMG_PATH")
+
+DMG_URL=$(echo "$DMG_RESPONSE" | grep -o '"browser_download_url":"[^"]*"' | cut -d'"' -f4)
+
+if [ -z "$DMG_URL" ]; then
+  echo "        ✗ Failed to upload DMG to GitHub"
+  echo "$DMG_RESPONSE"
+  exit 1
+fi
+echo "        Uploaded DMG → $DMG_URL"
 
 # ── 6. Update version.json on Supabase ───────────────────────────────────────
 echo "[ 6/7 ] Publishing version.json..."
 VERSION_JSON="{
   \"version\": \"$VERSION\",
   \"download_url\": \"$ZIP_URL\",
+  \"dmg_url\": \"$DMG_URL\",
   \"release_notes\": \"$NOTES\",
   \"mandatory\": $MANDATORY
 }"

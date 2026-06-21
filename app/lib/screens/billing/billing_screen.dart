@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:convert' as dart_convert;
+import 'package:uuid/uuid.dart';
 import 'dart:io';
-import 'dart:math' show max;
+import 'dart:math' show max, Random;
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -143,6 +145,7 @@ class _BillingScreenState extends State<BillingScreen> {
   final _searchController = TextEditingController();
   final _searchFocus = FocusNode();
   int _selectedTab = 1;
+  String _scanBuffer = '';
   String _inventorySearchQuery = '';
   String _inventoryCategoryFilter = 'All';
   double _rightPanelWidth = 375;
@@ -241,6 +244,10 @@ class _BillingScreenState extends State<BillingScreen> {
   String _paperSize = 'A4';
   bool _autoPrint = false;
 
+  // Current queued invoice number
+  String _queuedInvoiceNo = '';
+  String _queuedTransactionId = '';
+
   // Barcode print last-used settings
   double _barcodeLabelW = 58;
   double _barcodeLabelH = 30;
@@ -321,6 +328,7 @@ class _BillingScreenState extends State<BillingScreen> {
   @override
   void initState() {
     super.initState();
+    HardwareKeyboard.instance.addHandler(_handleHardwareKey);
     _cleanupCupsOptions();
     _loadSettingsFromStorage();
     _loadProducts();
@@ -331,28 +339,7 @@ class _BillingScreenState extends State<BillingScreen> {
     _loadCurrentVersion();
     ReceiptPrinter.preWarm();
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncTaxRate());
-    _searchFocus.addListener(() {
-      if (!_searchFocus.hasFocus && mounted) {
-        Future.delayed(const Duration(milliseconds: 150), () {
-          if (!mounted || _searchFocus.hasFocus || _showSettings) return;
-          final primary = FocusManager.instance.primaryFocus;
-          if (primary == null || primary.context == null) {
-            _searchFocus.requestFocus();
-            return;
-          }
-          // Don't steal focus from another text input (dialogs, customer fields, etc.)
-          bool otherTextFieldFocused = false;
-          primary.context?.visitAncestorElements((element) {
-            if (element.widget is EditableText) {
-              otherTextFieldFocused = true;
-              return false;
-            }
-            return true;
-          });
-          if (!otherTextFieldFocused) _searchFocus.requestFocus();
-        });
-      }
-    });
+    // Search bar no longer auto-steals focus — user must click it explicitly
   }
 
   // Removes corrupted BillCat-specific CUPS options written by older app versions.
@@ -417,6 +404,20 @@ class _BillingScreenState extends State<BillingScreen> {
     });
     _syncTaxRate();
     _restoreActivePrinter();
+    _refreshQueuedInvoiceNo();
+  }
+
+  void _refreshQueuedInvoiceNo() {
+    final prefix = _storeName.trim().replaceAll(RegExp(r'[^A-Za-z0-9]'), '').toUpperCase();
+    final p = prefix.length >= 3 ? prefix.substring(0, 3) : prefix.padRight(3, 'X');
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    final rng = Random.secure();
+    final rand = List.generate(5, (_) => chars[rng.nextInt(chars.length)]).join();
+    final txId = Uuid().v4();
+    if (mounted) setState(() {
+      _queuedInvoiceNo = '$p-$rand';
+      _queuedTransactionId = txId;
+    });
   }
 
   Future<void> _restoreActivePrinter() async {
@@ -494,6 +495,7 @@ class _BillingScreenState extends State<BillingScreen> {
   }
 
   Future<void> _loadProducts() async {
+    await LocalDbService.assignMissingBarcodeNos();
     final local = await LocalDbService.getProducts();
     final savedCats = await LocalDbService.getCategories();
     if (mounted) setState(() {
@@ -688,6 +690,7 @@ class _BillingScreenState extends State<BillingScreen> {
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_handleHardwareKey);
     _printSafetyTimer?.cancel();
     ConnectivityService.instance.removeListener(_onSyncComplete);
     _searchController.dispose();
@@ -1005,15 +1008,8 @@ class _BillingScreenState extends State<BillingScreen> {
             GestureDetector(
               onTap: () {
                 _bulkPrintQtys = { for (final p in _products) p.id: p.stock > 0 ? p.stock : 1 };
-                _bulkPrintSelected = {}; // start empty — user adds via search
+                _bulkPrintSelected = {};
                 _bulkPrinters = ['System Default'];
-                Process.run('lpstat', ['-p']).then((r) {
-                  final list = <String>['System Default'];
-                  for (final line in r.stdout.toString().split('\n')) {
-                    if (line.startsWith('printer ')) { final n = line.split(' ')[1]; if (n.isNotEmpty) list.add(n); }
-                  }
-                  if (mounted) setState(() => _bulkPrinters = list);
-                });
                 _showBulkPrintDialog();
               },
               child: Container(
@@ -1179,30 +1175,31 @@ class _BillingScreenState extends State<BillingScreen> {
                     child: TextField(
                       controller: _searchController,
                       focusNode: _searchFocus,
-                      autofocus: true,
+                      autofocus: false,
                       onChanged: (v) {
                         setState(() => _searchQuery = v);
-                        // Auto-add on exact SKU match (barcode scanner hit)
+                        // Auto-add on exact barcode/SKU match (barcode scanner hit)
                         final query = v.trim();
                         if (query.isNotEmpty) {
                           final match = _products.cast<Product?>().firstWhere(
-                            (p) => p!.sku.toLowerCase() == query.toLowerCase(), orElse: () => null);
+                            (p) => _barcodeMatches(p!.barcodeNo, query) || p.sku.toLowerCase() == query.toLowerCase(), orElse: () => null);
                           if (match != null) {
                             context.read<CartProvider>().addProduct(match);
                             setState(() { _searchQuery = ''; _searchController.clear(); });
                             _showToast('${match.name} added to cart');
-                            Future.microtask(() => _searchFocus.requestFocus());
+                            Future.delayed(const Duration(milliseconds: 50), () {
+                              if (mounted) _searchFocus.requestFocus();
+                            });
                           }
                         }
                       },
                       onSubmitted: (v) {
                         final query = v.trim();
-                        if (query.isEmpty) {
-                          _searchFocus.requestFocus();
-                          return;
-                        }
-                        // Exact SKU match first, then exact name, then partial SKU
+                        if (query.isEmpty) return;
+                        // Barcode no match first, then SKU, then name, then partial SKU
                         Product? match = _products.cast<Product?>().firstWhere(
+                          (p) => _barcodeMatches(p!.barcodeNo, query), orElse: () => null);
+                        match ??= _products.cast<Product?>().firstWhere(
                           (p) => p!.sku.toLowerCase() == query.toLowerCase(), orElse: () => null);
                         match ??= _products.cast<Product?>().firstWhere(
                           (p) => p!.name.toLowerCase() == query.toLowerCase(), orElse: () => null);
@@ -1212,10 +1209,10 @@ class _BillingScreenState extends State<BillingScreen> {
                           context.read<CartProvider>().addProduct(match);
                           setState(() { _searchQuery = ''; _searchController.clear(); });
                           _showToast('${match.name} added to cart');
+                          _searchFocus.unfocus();
                         } else {
                           _showToast('No product found for "$query"', isError: true);
                         }
-                        _searchFocus.requestFocus();
                       },
                       style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w500, color: AppColors.textDark),
                       decoration: InputDecoration(
@@ -2134,7 +2131,7 @@ class _BillingScreenState extends State<BillingScreen> {
           _bottomBarBtn(Icons.receipt_outlined, 'LAST RECEIPT'),
           const Spacer(),
           Text(
-              'POS T-01  •  SESSION: ${TimeOfDay.now().format(context)}  •  ${_sessionUserLabel()}',
+              'INV: #${_queuedTransactionId.length >= 6 ? _queuedTransactionId.replaceAll('-', '').substring(0, 6).toUpperCase() : '------'}  •  SESSION: ${TimeOfDay.now().format(context)}  •  ${_sessionUserLabel()}',
               style: GoogleFonts.inter(
                   fontSize: 10,
                   fontWeight: FontWeight.w300,
@@ -4853,11 +4850,11 @@ class _BillingScreenState extends State<BillingScreen> {
     // Open dialog immediately — load printers in the background
     List<Printer> systemPrinters = [];
 
-    const paperSizes = ['A4', 'A5', '2 inch', '3 inch', '4 inch', 'Custom'];
     Printer? selPrinter = _activePrinter;
     bool isPdfExport = _selectedPrinter == 'PDF Export';
     String paper = _paperSize;
-    bool autoPrint = _autoPrint;
+    // Map stored paper size to Thermal/Regular
+    bool isThermal = !['A4', 'A5'].contains(paper);
 
     Widget printerRow(String name, {bool selected = false, required VoidCallback onTap, IconData icon = Icons.print_rounded}) {
       return InkWell(
@@ -4971,62 +4968,46 @@ class _BillingScreenState extends State<BillingScreen> {
                 const Divider(height: 1, color: AppColors.border),
                 const SizedBox(height: 20),
 
-                // Paper size
-                _dialogSectionLabel('PAPER SIZE'),
+                // Printer type
+                _dialogSectionLabel('PRINTER TYPE'),
                 const SizedBox(height: 12),
-                Row(
-                  children: paperSizes.map((s) {
-                    final sel = paper == s;
-                    return Expanded(
-                      child: GestureDetector(
-                        onTap: () => setLocal(() => paper = s),
-                        child: Container(
-                          margin: EdgeInsets.only(right: s != paperSizes.last ? 8 : 0),
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                          decoration: BoxDecoration(
-                            color: sel ? AppColors.primary : AppColors.surfaceVariant,
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: sel ? AppColors.primary : AppColors.border),
-                          ),
-                          child: Center(
-                            child: Text(s,
-                                style: GoogleFonts.inter(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    color: sel ? Colors.white : AppColors.textMuted)),
-                          ),
-                        ),
+                Row(children: [
+                  Expanded(child: GestureDetector(
+                    onTap: () => setLocal(() { isThermal = false; paper = 'A4'; }),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      decoration: BoxDecoration(
+                        color: !isThermal ? AppColors.primary : AppColors.surfaceVariant,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: !isThermal ? AppColors.primary : AppColors.border),
                       ),
-                    );
-                  }).toList(),
-                ),
-
-                const SizedBox(height: 20),
-                const Divider(height: 1, color: AppColors.border),
-                const SizedBox(height: 16),
-
-                // Auto-print toggle
-                Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text('Auto-print on Close Bill',
-                              style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textDark)),
-                          Text('Automatically print receipt when bill is closed',
-                              style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w300, color: AppColors.textMuted)),
-                        ],
+                      child: Column(children: [
+                        Icon(Icons.print_rounded, size: 20, color: !isThermal ? Colors.white : AppColors.textMuted),
+                        const SizedBox(height: 6),
+                        Text('Regular', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: !isThermal ? Colors.white : AppColors.textMuted)),
+                        Text('A4 / A5', style: GoogleFonts.inter(fontSize: 10, color: !isThermal ? Colors.white.withValues(alpha: 0.8) : AppColors.textMuted)),
+                      ]),
+                    ),
+                  )),
+                  const SizedBox(width: 10),
+                  Expanded(child: GestureDetector(
+                    onTap: () => setLocal(() { isThermal = true; paper = '3 inch'; }),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      decoration: BoxDecoration(
+                        color: isThermal ? AppColors.primary : AppColors.surfaceVariant,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: isThermal ? AppColors.primary : AppColors.border),
                       ),
+                      child: Column(children: [
+                        Icon(Icons.receipt_long_rounded, size: 20, color: isThermal ? Colors.white : AppColors.textMuted),
+                        const SizedBox(height: 6),
+                        Text('Thermal', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: isThermal ? Colors.white : AppColors.textMuted)),
+                        Text('80mm roll', style: GoogleFonts.inter(fontSize: 10, color: isThermal ? Colors.white.withValues(alpha: 0.8) : AppColors.textMuted)),
+                      ]),
                     ),
-                    Switch(
-                      value: autoPrint,
-                      onChanged: (v) => setLocal(() => autoPrint = v),
-                      activeThumbColor: Colors.white,
-                      activeTrackColor: AppColors.primary,
-                    ),
-                  ],
-                ),
+                  )),
+                ]),
 
                 const SizedBox(height: 24),
 
@@ -5061,12 +5042,10 @@ class _BillingScreenState extends State<BillingScreen> {
                             _activePrinter = selPrinter;
                             _selectedPrinter = printerName;
                             _paperSize = paper;
-                            _autoPrint = autoPrint;
                           });
                           LocalDbService.saveSettings({
                             'selected_printer': printerName,
                             'paper_size': paper,
-                            'auto_print': autoPrint ? '1' : '0',
                           });
                           Navigator.pop(ctx);
                         },
@@ -5181,8 +5160,8 @@ class _BillingScreenState extends State<BillingScreen> {
 
   // ── Print helpers ────────────────────────────────────────────────────────────
 
-  TransactionRecord _snapshotCart(CartProvider cart, {String? invoiceNumber}) => TransactionRecord(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
+  TransactionRecord _snapshotCart(CartProvider cart, {String? invoiceNumber, String? transactionId}) => TransactionRecord(
+        id: transactionId ?? DateTime.now().millisecondsSinceEpoch.toString(),
         customerName: cart.customerName.isEmpty ? null : cart.customerName,
         customerPhone: cart.customerPhone.isEmpty ? null : cart.customerPhone,
         items: cart.items
@@ -5374,7 +5353,8 @@ class _BillingScreenState extends State<BillingScreen> {
                   const SizedBox(width: 10),
                   Expanded(child: ElevatedButton.icon(
                     onPressed: () {
-                      final snapshot = _snapshotCart(cart);
+                      final txId = _queuedTransactionId.isNotEmpty ? _queuedTransactionId : Uuid().v4();
+                      final snapshot = _snapshotCart(cart, transactionId: txId);
                       Navigator.pop(ctx);
                       if (sendToPrinter) _printCurrentBill(cart, docType: docType, toPrinter: true);
                       if (sendWhatsApp) {
@@ -5432,18 +5412,17 @@ class _BillingScreenState extends State<BillingScreen> {
           ? 'Receipt-${tx.invoiceNumber}'
           : 'Receipt-${tx.id.substring(0, 6).toUpperCase()}';
 
-      final tmp = await Directory.systemTemp.createTemp('billcat_');
-      final pdfFile = File('${tmp.path}/$receiptName.pdf');
+      final pdfFile = File('/tmp/$receiptName.pdf');
       await pdfFile.writeAsBytes(pdfBytes);
       final ProcessResult result;
       if (toPrinter) {
         // lpr sends directly to the selected printer silently — no UI opens
         final args = <String>[];
         if (_selectedPrinter != 'System Default' && _selectedPrinter != 'PDF Export' && _selectedPrinter.isNotEmpty) {
-          args.addAll(['-P', _selectedPrinter]);
+          args.addAll(['-P', _selectedPrinter.replaceAll(' ', '_')]);
         }
         args.add(pdfFile.path);
-        result = await Process.run('lpr', args);
+        result = await Process.run('/usr/bin/lpr', args);
       } else {
         result = await Process.run('osascript', ['-e',
   'tell application "Preview" to activate\n'
@@ -5550,11 +5529,14 @@ class _BillingScreenState extends State<BillingScreen> {
                         color: AppColors.textMuted))),
             ElevatedButton(
               onPressed: () async {
-                final invNum = LocalDbService.generateInvoiceId();
-                final snapshot = _snapshotCart(cart, invoiceNumber: invNum);
+                final invNum = _queuedInvoiceNo.isNotEmpty ? _queuedInvoiceNo : LocalDbService.generateInvoiceId();
+                final txId = _queuedTransactionId.isNotEmpty ? _queuedTransactionId : Uuid().v4();
+                final snapshot = _snapshotCart(cart, invoiceNumber: invNum, transactionId: txId);
                 final phone = cart.customerPhone;
                 Navigator.pop(ctx);
-                await cart.checkout(invoiceNumber: invNum);
+                await cart.checkout(invoiceNumber: invNum, transactionId: txId);
+                await ConnectivityService.instance.syncNow();
+                _refreshQueuedInvoiceNo();
                 _customerNameCtrl.clear();
                 _customerPhoneCtrl.clear();
                 _loadProducts();
@@ -5610,16 +5592,121 @@ class _BillingScreenState extends State<BillingScreen> {
     } catch (_) {}
   }
 
+  String _esc(String? s) => (s ?? '')
+      .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+
+  String _buildReceiptHtml(TransactionRecord tx, {String docType = 'Invoice'}) {
+    final sym = _currencySymbol;
+    final invoiceNo = _esc(tx.invoiceNumber ?? tx.id.substring(0, 6).toUpperCase());
+    final date = tx.createdAt;
+    final dateStr = '${date.day}/${date.month}/${date.year}';
+    final timeStr = '${date.hour.toString().padLeft(2,'0')}:${date.minute.toString().padLeft(2,'0')}';
+    final itemRows = tx.items.map((item) {
+      final name = _esc(item.productName);
+      final qty = item.quantity;
+      final price = item.price.toStringAsFixed(2);
+      final total = (item.price * item.quantity).toStringAsFixed(2);
+      return '<tr><td>$name</td><td class="center">$qty</td><td class="right">$sym$price</td><td class="right">$sym$total</td></tr>';
+    }).join();
+    final subtotal = tx.subtotal.toStringAsFixed(2);
+    final discount = tx.discountAmount;
+    final tax = tx.taxAmount;
+    final total = tx.total.toStringAsFixed(2);
+    final storeName = _esc(_storeName);
+    final initial = storeName.isEmpty ? 'B' : storeName[0].toUpperCase();
+
+    return '''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>$docType #$invoiceNo — $storeName</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',sans-serif;background:#f0f4f8;color:#1a1a2e;min-height:100vh;padding:24px 16px}
+.card{background:#fff;max-width:540px;margin:0 auto;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.08)}
+.header{background:#006e25;padding:28px 28px 24px;color:#fff}
+.header-top{display:flex;align-items:center;gap:14px;margin-bottom:16px}
+.logo{width:52px;height:52px;border-radius:10px;background:rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;color:#fff}
+.store-name{font-size:20px;font-weight:700}
+.store-sub{font-size:12px;color:rgba(255,255,255,.75);margin-top:2px}
+.badge{background:rgba(255,255,255,.18);border-radius:8px;padding:10px 16px;display:flex;justify-content:space-between;align-items:center}
+.inv-label{font-size:11px;font-weight:600;color:rgba(255,255,255,.7);text-transform:uppercase;letter-spacing:.6px}
+.inv-no{font-size:17px;font-weight:700}
+.inv-date{font-size:12px;color:rgba(255,255,255,.8);text-align:right}
+.body{padding:24px 28px}
+.sec{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:#8a9bb0;margin-bottom:8px}
+.cust{background:#f7fafc;border-radius:10px;padding:12px 16px;margin-bottom:20px}
+.cust-name{font-size:15px;font-weight:600}
+.cust-ph{font-size:12px;color:#8a9bb0;margin-top:2px}
+table{width:100%;border-collapse:collapse;margin-bottom:4px}
+thead tr{border-bottom:1px solid #e8edf2}
+thead th{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#8a9bb0;padding:6px 4px;text-align:left}
+th.center,td.center{text-align:center}th.right,td.right{text-align:right}
+tbody tr{border-bottom:1px solid #f0f4f8}
+tbody td{font-size:13px;padding:10px 4px;vertical-align:top}
+.totals{margin-top:12px;border-top:1px solid #e8edf2;padding-top:12px}
+.row{display:flex;justify-content:space-between;font-size:13px;color:#4a5568;margin-bottom:6px}
+.row.grand{font-size:16px;font-weight:700;color:#1a1a2e;margin-top:8px;padding-top:8px;border-top:2px solid #e8edf2}
+.paid{display:inline-block;background:#e6f4ea;color:#006e25;font-size:11px;font-weight:700;padding:4px 10px;border-radius:20px;margin-bottom:20px}
+.pm{font-size:12px;color:#8a9bb0;margin-bottom:20px}
+.divider{height:1px;background:#e8edf2;margin:16px 0}
+.powered{margin-top:20px;text-align:center;font-size:11px;color:#b0bec5}
+.powered a{color:#006e25;font-weight:600;text-decoration:none}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="header">
+    <div class="header-top">
+      <div class="logo">$initial</div>
+      <div><div class="store-name">$storeName</div>${_esc(_storeAddress).isNotEmpty ? '<div class="store-sub">${_esc(_storeAddress)}</div>' : ''}</div>
+    </div>
+    <div class="badge">
+      <div><div class="inv-label">$docType</div><div class="inv-no">#$invoiceNo</div></div>
+      <div class="inv-date"><div>$dateStr</div><div>$timeStr</div></div>
+    </div>
+  </div>
+  <div class="body">
+    ${tx.customerName?.isNotEmpty == true ? '<div class="sec">Bill To</div><div class="cust"><div class="cust-name">${_esc(tx.customerName)}</div>${tx.customerPhone?.isNotEmpty == true ? '<div class="cust-ph">${_esc(tx.customerPhone)}</div>' : ''}</div>' : ''}
+    <div class="sec">Items</div>
+    <table>
+      <thead><tr><th>Item</th><th class="center">Qty</th><th class="right">Price</th><th class="right">Total</th></tr></thead>
+      <tbody>$itemRows</tbody>
+    </table>
+    <div class="totals">
+      <div class="row"><span>Subtotal</span><span>$sym$subtotal</span></div>
+      ${discount > 0 ? '<div class="row"><span>Discount</span><span>-$sym${discount.toStringAsFixed(2)}</span></div>' : ''}
+      ${tax > 0 ? '<div class="row"><span>$_taxLabel</span><span>$sym${tax.toStringAsFixed(2)}</span></div>' : ''}
+      <div class="row grand"><span>Total</span><span>$sym$total</span></div>
+    </div>
+    <div class="divider"></div>
+    <div class="paid">✓ PAID</div>
+    <div class="pm">Payment via ${_esc(tx.paymentMethod)}</div>
+    <div class="powered">Powered by <a href="https://billcat.in">BillCat</a></div>
+  </div>
+</div>
+</body>
+</html>''';
+  }
+
   Future<void> _sendInvoiceViaWhatsApp(TransactionRecord tx, String phone, {String docType = 'Invoice'}) async {
     if (phone.isEmpty) {
       _showToast('No customer phone number to send to.', isError: true);
       return;
     }
 
-    final invoiceNo = tx.invoiceNumber ?? tx.id.substring(0, 6).toUpperCase();
+    // Use tx.id prefix — matches Supabase's id column, website has id-prefix fallback query
+    final invoiceNo = tx.id.replaceAll('-', '').substring(0, 6).toLowerCase();
+
+    // Generate link immediately, sync in background
     final rawUid = Supabase.instance.client.auth.currentUser?.id ?? 'unknown';
-    final shortUid = rawUid.replaceAll('-', '').substring(0, rawUid.length >= 6 ? 6 : rawUid.length).toUpperCase();
-    final invoiceLink = 'https://billcat.in/invoices/$shortUid/$_branchNumber/Bill-$invoiceNo';
+    final shortUid = rawUid.replaceAll('-', '').substring(0, 6).toLowerCase();
+    final branchPadded = _branchNumber.padLeft(2, '0');
+    final invoiceLink = 'https://billcat.in/invoices/$shortUid$branchPadded$invoiceNo';
+    ConnectivityService.instance.syncNow().ignore();
 
     // If Meta API is configured, send directly
     if (_waPhoneNumberId.isNotEmpty && _waAccessToken.isNotEmpty) {
@@ -5676,8 +5763,8 @@ class _BillingScreenState extends State<BillingScreen> {
         'Payment Status: Paid\n\n'
         'For any queries, feel free to contact us.\n'
         'Thank you for your support!\n\n'
-        '— $_storeName\n\n'
-        '$invoiceLink',
+        '— $_storeName'
+        '${invoiceLink.isNotEmpty ? '\n\nView your bill: $invoiceLink' : ''}',
       );
       final url = 'https://web.whatsapp.com/send?phone=$normalized&text=$message';
       // Reuse existing WhatsApp Web tab in Chrome if open, else open new tab
@@ -5945,7 +6032,7 @@ end tell
     final searchCtrl  = TextEditingController();
     final qtys        = Map<String, int>.from(_bulkPrintQtys);
     final selected    = Map<String, bool>.from(_bulkPrintSelected);
-    final printers    = List<String>.from(_bulkPrinters);
+    var printers      = <String>['System Default'];
     String printer    = _barcodePrinter;
     String searchQ    = '';
 
@@ -5957,13 +6044,22 @@ end tell
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setLocal) {
-        final addedProducts = _products.where((p) => selected[p.id] == true).toList();
-        final searchResults = searchQ.isEmpty ? <Product>[] : _products.where((p) {
-          if (selected[p.id] == true) return false; // already added
-          final q = searchQ.toLowerCase();
-          return p.name.toLowerCase().contains(q) || p.sku.toLowerCase().contains(q);
-        }).toList();
-        final total = addedProducts.fold<int>(0, (s, p) => s + (qtys[p.id] ?? 0));
+        if (printers.length <= 1) {
+          Printing.listPrinters().then((list) {
+            final names = <String>['System Default', ...list.map((p) => p.name)];
+            if (ctx.mounted) setLocal(() {
+              printers = names;
+              if (names.contains(_barcodePrinter)) printer = _barcodePrinter;
+            });
+          });
+        }
+        final filteredProducts = searchQ.isEmpty
+          ? _products
+          : _products.where((p) {
+              final q = searchQ.toLowerCase();
+              return p.name.toLowerCase().contains(q) || p.sku.toLowerCase().contains(q);
+            }).toList();
+        final total = _products.where((p) => selected[p.id] == true).fold<int>(0, (s, p) => s + (qtys[p.id] ?? 0));
 
         return Dialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
@@ -6016,100 +6112,53 @@ end tell
                   ))),
                 ]),
               ),
-              // ── Search to add ──
+              // ── Search bar ──
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-                child: Column(children: [
-                  Container(
-                    height: 38,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: AppColors.border),
-                    ),
-                    child: Row(children: [
-                      const SizedBox(width: 10),
-                      const Icon(Icons.add_circle_outline_rounded, size: 16, color: AppColors.textMuted),
-                      const SizedBox(width: 8),
-                      Expanded(child: TextField(
-                        controller: searchCtrl,
-                        onChanged: (v) => setLocal(() => searchQ = v),
-                        style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
-                        decoration: InputDecoration(
-                          isDense: true, border: InputBorder.none,
-                          hintText: 'Search to add products…',
-                          hintStyle: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted),
-                          contentPadding: EdgeInsets.zero,
-                        ),
-                      )),
-                      if (searchQ.isNotEmpty) InkWell(
-                        onTap: () { searchCtrl.clear(); setLocal(() => searchQ = ''); },
-                        borderRadius: BorderRadius.circular(12),
-                        child: const Padding(padding: EdgeInsets.all(6),
-                          child: Icon(Icons.close_rounded, size: 14, color: AppColors.textMuted)),
+                child: Container(
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: AppColors.border),
+                  ),
+                  child: Row(children: [
+                    const SizedBox(width: 10),
+                    const Icon(Icons.search_rounded, size: 16, color: AppColors.textMuted),
+                    const SizedBox(width: 8),
+                    Expanded(child: TextField(
+                      controller: searchCtrl,
+                      onChanged: (v) => setLocal(() => searchQ = v),
+                      style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
+                      decoration: InputDecoration(
+                        isDense: true, border: InputBorder.none,
+                        hintText: 'Search products…',
+                        hintStyle: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted),
+                        contentPadding: EdgeInsets.zero,
                       ),
-                      const SizedBox(width: 6),
-                    ]),
-                  ),
-                  // Search results dropdown
-                  if (searchResults.isNotEmpty) Container(
-                    constraints: const BoxConstraints(maxHeight: 180),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: AppColors.border),
-                      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 8, offset: const Offset(0, 3))],
+                    )),
+                    if (searchQ.isNotEmpty) InkWell(
+                      onTap: () { searchCtrl.clear(); setLocal(() => searchQ = ''); },
+                      borderRadius: BorderRadius.circular(12),
+                      child: const Padding(padding: EdgeInsets.all(6),
+                        child: Icon(Icons.close_rounded, size: 14, color: AppColors.textMuted)),
                     ),
-                    child: ListView.separated(
-                      shrinkWrap: true,
-                      itemCount: searchResults.length,
-                      separatorBuilder: (_, __) => Divider(height: 1, color: AppColors.border),
-                      itemBuilder: (_, i) {
-                        final p = searchResults[i];
-                        return InkWell(
-                          onTap: () {
-                            setLocal(() {
-                              selected[p.id] = true;
-                              if (!qtys.containsKey(p.id)) { qtys[p.id] = p.stock > 0 ? p.stock : 1; qtyCtrlMap[p.id]?.text = '${qtys[p.id]}'; }
-                              searchCtrl.clear(); searchQ = '';
-                            });
-                          },
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-                            child: Row(children: [
-                              Container(width: 44, height: 20,
-                                decoration: BoxDecoration(color: const Color(0xFFF5F5F5), borderRadius: BorderRadius.circular(3)),
-                                child: CustomPaint(painter: _BarcodePainter(p.sku))),
-                              const SizedBox(width: 10),
-                              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                Text(p.name, style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.textDark), maxLines: 1, overflow: TextOverflow.ellipsis),
-                                Text('${p.sku}  ·  ${p.stock} in stock', style: GoogleFonts.inter(fontSize: 10, color: AppColors.textMuted)),
-                              ])),
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                decoration: BoxDecoration(color: AppColors.primary.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(6)),
-                                child: Text('Add', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.primary)),
-                              ),
-                            ]),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                ]),
+                    const SizedBox(width: 6),
+                  ]),
+                ),
               ),
-              // ── Added products grid ──
+              // ── Products grid ──
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(maxHeight: 340),
-                  child: addedProducts.isEmpty
+                  child: filteredProducts.isEmpty
                     ? Padding(
                         padding: const EdgeInsets.symmetric(vertical: 32),
                         child: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-                          Icon(Icons.inbox_outlined, size: 32, color: AppColors.textMuted.withValues(alpha: 0.4)),
+                          Icon(Icons.search_off_rounded, size: 32, color: AppColors.textMuted.withValues(alpha: 0.4)),
                           const SizedBox(height: 8),
-                          Text('Search above to add products', style: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted)),
+                          Text('No products found', style: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted)),
                         ])),
                       )
                     : GridView.builder(
@@ -6120,70 +6169,97 @@ end tell
                           mainAxisSpacing: 10,
                           childAspectRatio: 1.3,
                         ),
-                        itemCount: addedProducts.length,
+                        itemCount: filteredProducts.length,
                         itemBuilder: (_, i) {
-                          final p = addedProducts[i];
+                          final p = filteredProducts[i];
+                          final isSelected = selected[p.id] == true;
                           final qty = qtys[p.id] ?? 1;
                           final qtyCtrl = qtyCtrlMap[p.id] ??= TextEditingController(text: '$qty');
-                          return Container(
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: AppColors.border),
-                            ),
-                            child: Padding(
-                              padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
-                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                // Name + remove
-                                Row(children: [
-                                  Expanded(child: Text(p.name,
-                                    style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textDark),
-                                    maxLines: 1, overflow: TextOverflow.ellipsis)),
-                                  InkWell(
-                                    onTap: () => setLocal(() => selected[p.id] = false),
-                                    borderRadius: BorderRadius.circular(10),
-                                    child: const Padding(padding: EdgeInsets.all(2),
-                                      child: Icon(Icons.close_rounded, size: 13, color: AppColors.textMuted)),
+                          return GestureDetector(
+                            onTap: () {
+                              setLocal(() {
+                                if (isSelected) {
+                                  selected[p.id] = false;
+                                } else {
+                                  selected[p.id] = true;
+                                  if (!qtys.containsKey(p.id)) {
+                                    qtys[p.id] = p.stock > 0 ? p.stock : 1;
+                                    qtyCtrlMap[p.id]?.text = '${qtys[p.id]}';
+                                  }
+                                }
+                              });
+                            },
+                            child: Stack(children: [
+                              Container(
+                                decoration: BoxDecoration(
+                                  color: isSelected ? AppColors.primary.withValues(alpha: 0.04) : Colors.white,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: isSelected ? AppColors.primary : AppColors.border,
+                                    width: isSelected ? 2 : 1,
                                   ),
-                                ]),
-                                const SizedBox(height: 5),
-                                // Barcode
-                                Container(
-                                  width: double.infinity, height: 30,
-                                  decoration: BoxDecoration(color: const Color(0xFFF5F5F5), borderRadius: BorderRadius.circular(5)),
-                                  child: CustomPaint(painter: _BarcodePainter(p.sku))),
-                                const SizedBox(height: 4),
-                                Text(p.sku, style: GoogleFonts.inter(fontSize: 9, color: AppColors.textMuted)),
-                                const Spacer(),
-                                // Editable qty stepper
-                                Container(
-                                  height: 28,
-                                  decoration: BoxDecoration(color: AppColors.surfaceVariant, borderRadius: BorderRadius.circular(7)),
-                                  child: Row(children: [
-                                    InkWell(
-                                      onTap: qty > 1 ? () { setLocal(() => qtys[p.id] = qty - 1); qtyCtrl.text = '${qty - 1}'; } : null,
-                                      borderRadius: const BorderRadius.horizontal(left: Radius.circular(6)),
-                                      child: Container(width: 26, height: 28, alignment: Alignment.center,
-                                        child: Icon(Icons.remove_rounded, size: 11, color: qty > 1 ? AppColors.textDark : AppColors.textMuted))),
-                                    Container(width: 1, height: 16, color: AppColors.border),
-                                    Expanded(child: TextFormField(
-                                      controller: qtyCtrl,
-                                      keyboardType: TextInputType.number,
-                                      textAlign: TextAlign.center,
-                                      style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textDark),
-                                      decoration: const InputDecoration(isDense: true, border: InputBorder.none, contentPadding: EdgeInsets.zero),
-                                      onChanged: (v) { final n = int.tryParse(v); if (n != null && n > 0) setLocal(() => qtys[p.id] = n); },
-                                    )),
-                                    Container(width: 1, height: 16, color: AppColors.border),
-                                    InkWell(
-                                      onTap: () { setLocal(() => qtys[p.id] = qty + 1); qtyCtrl.text = '${qty + 1}'; },
-                                      borderRadius: const BorderRadius.horizontal(right: Radius.circular(6)),
-                                      child: Container(width: 26, height: 28, alignment: Alignment.center,
-                                        child: const Icon(Icons.add_rounded, size: 11, color: AppColors.textDark))),
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+                                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                    Padding(
+                                      padding: const EdgeInsets.only(right: 14),
+                                      child: Text(p.name,
+                                        style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600,
+                                          color: isSelected ? AppColors.primary : AppColors.textDark),
+                                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                                    ),
+                                    const SizedBox(height: 5),
+                                    Container(
+                                      width: double.infinity, height: 30,
+                                      decoration: BoxDecoration(color: const Color(0xFFF5F5F5), borderRadius: BorderRadius.circular(5)),
+                                      child: CustomPaint(painter: _BarcodePainter(p.sku))),
+                                    const SizedBox(height: 4),
+                                    Text(p.sku, style: GoogleFonts.inter(fontSize: 9, color: AppColors.textMuted)),
+                                    const Spacer(),
+                                    if (isSelected) Container(
+                                      height: 28,
+                                      decoration: BoxDecoration(color: AppColors.surfaceVariant, borderRadius: BorderRadius.circular(7)),
+                                      child: Row(children: [
+                                        InkWell(
+                                          onTap: qty > 1 ? () { setLocal(() => qtys[p.id] = qty - 1); qtyCtrl.text = '${qty - 1}'; } : null,
+                                          borderRadius: const BorderRadius.horizontal(left: Radius.circular(6)),
+                                          child: Container(width: 26, height: 28, alignment: Alignment.center,
+                                            child: Icon(Icons.remove_rounded, size: 11, color: qty > 1 ? AppColors.textDark : AppColors.textMuted))),
+                                        Container(width: 1, height: 16, color: AppColors.border),
+                                        Expanded(child: TextFormField(
+                                          controller: qtyCtrl,
+                                          keyboardType: TextInputType.number,
+                                          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                                          textAlign: TextAlign.center,
+                                          style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textDark),
+                                          decoration: const InputDecoration(isDense: true, border: InputBorder.none, contentPadding: EdgeInsets.zero),
+                                          onChanged: (v) { final n = int.tryParse(v); if (n != null && n > 0) setLocal(() => qtys[p.id] = n); },
+                                        )),
+                                        Container(width: 1, height: 16, color: AppColors.border),
+                                        InkWell(
+                                          onTap: () { setLocal(() => qtys[p.id] = qty + 1); qtyCtrl.text = '${qty + 1}'; },
+                                          borderRadius: const BorderRadius.horizontal(right: Radius.circular(6)),
+                                          child: Container(width: 26, height: 28, alignment: Alignment.center,
+                                            child: const Icon(Icons.add_rounded, size: 11, color: AppColors.textDark))),
+                                      ]),
+                                    ) else Padding(
+                                      padding: const EdgeInsets.only(top: 2),
+                                      child: Text('${p.stock} in stock',
+                                        style: GoogleFonts.inter(fontSize: 9, color: AppColors.textMuted)),
+                                    ),
                                   ]),
                                 ),
-                              ]),
-                            ),
+                              ),
+                              if (isSelected) Positioned(
+                                top: 6, right: 6,
+                                child: Container(
+                                  width: 18, height: 18,
+                                  decoration: const BoxDecoration(color: AppColors.primary, shape: BoxShape.circle),
+                                  child: const Icon(Icons.check_rounded, size: 12, color: Colors.white),
+                                ),
+                              ),
+                            ]),
                           );
                         },
                       ),
@@ -6278,14 +6354,20 @@ end tell
     final allLabels = <pw.Widget>[];
     for (final p in products) {
       final count = qtys[p.id] ?? 1;
-      final svgStr = bc.Barcode.code128().toSvg(p.sku, width: 200, height: 80, drawText: false);
+      final barcodeVal = p.barcodeNo.isNotEmpty ? p.barcodeNo : p.sku;
+      String svgStr;
+      try {
+        svgStr = bc.Barcode.ean13().toSvg(barcodeVal, width: 200, height: 80, drawText: false);
+      } catch (_) {
+        svgStr = bc.Barcode.code128().toSvg(barcodeVal, width: 200, height: 80, drawText: false);
+      }
       final innerPad = 5.0 * PdfPageFormat.mm;
       pw.Widget labelCell() => pw.Container(
         width: cellW, height: cellH,
         padding: pw.EdgeInsets.symmetric(horizontal: innerPad, vertical: 1.5 * PdfPageFormat.mm),
         child: pw.Column(mainAxisAlignment: pw.MainAxisAlignment.center, children: [
           pw.SvgImage(svg: svgStr, width: (cellW - innerPad * 2), height: (cellH - 2 * PdfPageFormat.mm) * 0.62),
-          pw.Text(p.sku, style: pw.TextStyle(font: bold, fontSize: 4.5, letterSpacing: 0.4), textAlign: pw.TextAlign.center),
+          pw.Text(p.name, style: pw.TextStyle(font: bold, fontSize: 4.5, letterSpacing: 0.4), textAlign: pw.TextAlign.center),
           pw.Text('$_currencySymbol${p.price.toStringAsFixed(2)}', style: pw.TextStyle(font: bold, fontSize: 4.5), textAlign: pw.TextAlign.center),
         ]),
       );
@@ -6374,20 +6456,21 @@ end tell
                     final sheetW = marginMm * 2 + labelsPerRow * labelW + (labelsPerRow - 1) * gapMm;
                     final sheetH = labelH;
                     final targetPrinter = (printerName != null && printerName != 'System Default') ? printerName : null;
-                    if (targetPrinter != null) {
-                      final wPt = (sheetW / 25.4 * 72).round();
-                      final hPt = (sheetH / 25.4 * 72).round();
-                      final result = await Process.run('lpr', ['-P', targetPrinter, '-o', 'fit-to-page=false', '-o', 'media=Custom.${wPt}x$hPt', '-o', 'scaling=100', pdfFile.path]);
-                      if (result.exitCode != 0 && mounted) _showToast('Print failed: ${result.stderr}', isError: true);
-                    } else {
-                      await Process.run('osascript', ['-e',
-'tell application "Preview" to activate\n'
-'tell application "Preview" to open POSIX file "${pdfFile.path}"\n'
-'delay 1.5\n'
-'tell application "System Events" to keystroke "p" using command down',
-                      ]);
+                    final wPt = (sheetW / 25.4 * 72).round();
+                    final hPt = (sheetH / 25.4 * 72).round();
+                    final lprArgs = [
+                      if (targetPrinter != null) ...[ '-P', targetPrinter],
+                      '-o', 'fit-to-page=false',
+                      '-o', 'media=Custom.${wPt}x$hPt',
+                      '-o', 'scaling=100',
+                      pdfFile.path,
+                    ];
+                    final result = await Process.run('lpr', lprArgs);
+                    if (result.exitCode != 0 && mounted) {
+                      _showToast('Print failed: ${result.stderr}', isError: true);
+                    } else if (mounted) {
+                      _showToast('Sent to ${targetPrinter ?? 'default printer'}');
                     }
-                    if (mounted) _showToast('Sent to ${targetPrinter ?? 'printer'}');
                   },
                   icon: const Icon(Icons.print_rounded, size: 15),
                   label: Text('Print', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600)),
@@ -6418,7 +6501,8 @@ end tell
       final q = _inventorySearchQuery.toLowerCase();
       return p.name.toLowerCase().contains(q) ||
           p.sku.toLowerCase().contains(q) ||
-          p.category.toLowerCase().contains(q);
+          p.category.toLowerCase().contains(q) ||
+          p.barcodeNo.contains(q);
     }).toList();
 
     return Padding(
@@ -6807,7 +6891,7 @@ end tell
                 style: GoogleFonts.manrope(fontSize: 14,
                     fontWeight: FontWeight.w800, color: AppColors.textDark)),
             const Spacer(),
-            Text('${p.stock} pcs', style: GoogleFonts.inter(
+            Text('${p.stock} ${p.unit}', style: GoogleFonts.inter(
                 fontSize: 11, fontWeight: FontWeight.w600,
                 color: p.stock < 10 ? AppColors.error : AppColors.textMuted)),
           ]),
@@ -6838,7 +6922,9 @@ end tell
               child: Icon(Icons.remove_rounded, size: 15, color: val > 1 ? AppColors.textDark : AppColors.textMuted))),
           Container(width: 1, height: 24, color: AppColors.border),
           SizedBox(width: 52, height: 38, child: Center(child: TextFormField(
-            controller: ctrl, keyboardType: TextInputType.number, textAlign: TextAlign.center,
+            controller: ctrl, keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            textAlign: TextAlign.center,
             style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w700, color: AppColors.textDark),
             decoration: const InputDecoration(isDense: true, border: InputBorder.none, contentPadding: EdgeInsets.zero),
             onChanged: onChange,
@@ -6874,16 +6960,12 @@ end tell
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setLocal) {
-          // Load printers on first render so saved printer is pre-selected
           if (availablePrinters.length <= 1) {
-            Process.run('lpstat', ['-p']).then((r) {
-              final list = <String>['System Default'];
-              for (final line in r.stdout.toString().split('\n')) {
-                if (line.startsWith('printer ')) { final n = line.split(' ')[1]; if (n.isNotEmpty) list.add(n); }
-              }
+            Printing.listPrinters().then((list) {
+              final names = <String>['System Default', ...list.map((p) => p.name)];
               if (ctx.mounted) setLocal(() {
-                availablePrinters = list;
-                if (list.contains(_barcodePrinter)) selectedDialogPrinter = _barcodePrinter;
+                availablePrinters = names;
+                if (names.contains(_barcodePrinter)) selectedDialogPrinter = _barcodePrinter;
               });
             });
           }
@@ -7076,7 +7158,13 @@ end tell
   }
 
   Future<void> _printBarcode(Product p, {int quantity = 1, double labelW = 58, double labelH = 30, int labelsPerRow = 1, String? printerName}) async {
-    final svgStr = bc.Barcode.code128().toSvg(p.sku, width: 200, height: 60, drawText: false);
+    final barcodeVal = p.barcodeNo.isNotEmpty ? p.barcodeNo : p.sku;
+    String svgStr;
+    try {
+      svgStr = bc.Barcode.ean13().toSvg(barcodeVal, width: 200, height: 60, drawText: false);
+    } catch (_) {
+      svgStr = bc.Barcode.code128().toSvg(barcodeVal, width: 200, height: 60, drawText: false);
+    }
 
     final regularData = await rootBundle.load('assets/fonts/NotoSans-Regular.ttf');
     final boldData    = await rootBundle.load('assets/fonts/NotoSans-Bold.ttf');
@@ -7104,7 +7192,7 @@ end tell
         mainAxisAlignment: pw.MainAxisAlignment.center,
         children: [
           pw.SvgImage(svg: svgStr, width: cellW - pad * 2, height: (cellH - 2 * PdfPageFormat.mm) * 0.62),
-          pw.Text(p.sku, style: pw.TextStyle(font: bold, fontSize: 4.5, letterSpacing: 0.4), textAlign: pw.TextAlign.center),
+          pw.Text(p.name, style: pw.TextStyle(font: bold, fontSize: 4.5, letterSpacing: 0.4), textAlign: pw.TextAlign.center),
           pw.Text('$_currencySymbol${p.price.toStringAsFixed(2)}', style: pw.TextStyle(font: bold, fontSize: 4.5), textAlign: pw.TextAlign.center),
         ],
       ),
@@ -7198,24 +7286,19 @@ end tell
                     final targetPrinter = (printerName != null && printerName != 'System Default') ? printerName : null;
                     final wPt = (sheetW / 25.4 * 72).round();
                     final hPt = (sheetH / 25.4 * 72).round();
-                    if (targetPrinter != null) {
-                      await Process.run('lpr', [
-                        '-P', targetPrinter,
-                        '-o', 'fit-to-page=false',
-                        '-o', 'media=Custom.${wPt}x$hPt',
-                        '-o', 'scaling=100',
-                        pdfFile.path,
-                      ]);
-                    } else {
-                      // No printer selected — open Preview as fallback
-                      await Process.run('osascript', ['-e',
-'tell application "Preview" to activate\n'
-'tell application "Preview" to open POSIX file "${pdfFile.path}"\n'
-'delay 1.5\n'
-'tell application "System Events" to keystroke "p" using command down',
-                      ]);
+                    final lprArgs2 = [
+                      if (targetPrinter != null) ...[ '-P', targetPrinter],
+                      '-o', 'fit-to-page=false',
+                      '-o', 'media=Custom.${wPt}x$hPt',
+                      '-o', 'scaling=100',
+                      pdfFile.path,
+                    ];
+                    final result2 = await Process.run('lpr', lprArgs2);
+                    if (result2.exitCode != 0 && mounted) {
+                      _showToast('Print failed: ${result2.stderr}', isError: true);
+                    } else if (mounted) {
+                      _showToast('Sent to ${targetPrinter ?? 'default printer'}');
                     }
-                    if (mounted) _showToast('Sent to ${targetPrinter ?? 'printer'}');
                   },
                   icon: const Icon(Icons.print_rounded, size: 15),
                   label: Text('Print', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600)),
@@ -7268,7 +7351,13 @@ end tell
 
     final allLabels = <pw.Widget>[];
     for (final p in products) {
-      final svgStr = bc.Barcode.code128().toSvg(p.sku, width: 200, height: 80, drawText: false);
+      final barcodeVal = p.barcodeNo.isNotEmpty ? p.barcodeNo : p.sku;
+      String svgStr;
+      try {
+        svgStr = bc.Barcode.ean13().toSvg(barcodeVal, width: 200, height: 80, drawText: false);
+      } catch (_) {
+        svgStr = bc.Barcode.code128().toSvg(barcodeVal, width: 200, height: 80, drawText: false);
+      }
       allLabels.add(pw.Container(
         width: lw, height: lh,
         padding: pw.EdgeInsets.symmetric(horizontal: 5 * PdfPageFormat.mm, vertical: 1.5 * PdfPageFormat.mm),
@@ -7303,12 +7392,23 @@ end tell
     final tmp = await Directory.systemTemp.createTemp('billcat_barcodes_');
     final pdfFile = File('${tmp.path}/Barcodes.pdf');
     await pdfFile.writeAsBytes(bytes);
-    await Process.run('osascript', ['-e',
-  'tell application "Preview" to activate\n'
-  'tell application "Preview" to open POSIX file "${pdfFile.path}"\n'
-  'delay 1\n'
-  'tell application "System Events" to keystroke "p" using command down',
-]);
+    final targetPrinter3 = (_barcodePrinter != 'System Default') ? _barcodePrinter : null;
+    final sheetW3 = 2.0 * 2 + _barcodePerRow * _barcodeLabelW + (_barcodePerRow - 1) * 0.5;
+    final sheetH3 = _barcodeLabelH;
+    final wPt3 = (sheetW3 / 25.4 * 72).round();
+    final hPt3 = (sheetH3 / 25.4 * 72).round();
+    final result3 = await Process.run('lpr', [
+      if (targetPrinter3 != null) ...[ '-P', targetPrinter3],
+      '-o', 'fit-to-page=false',
+      '-o', 'media=Custom.${wPt3}x$hPt3',
+      '-o', 'scaling=100',
+      pdfFile.path,
+    ]);
+    if (result3.exitCode != 0 && mounted) {
+      _showToast('Print failed: ${result3.stderr}', isError: true);
+    } else if (mounted) {
+      _showToast('Sent to ${targetPrinter3 ?? 'default printer'}');
+    }
   }
 
   void _confirmDeleteProduct(Product p) {
@@ -7349,9 +7449,16 @@ end tell
     final buyingPriceCtrl = TextEditingController(text: p.buyingPrice > 0 ? p.buyingPrice.toStringAsFixed(2) : '');
     final taxPercentCtrl = TextEditingController(text: p.taxPercent > 0 ? p.taxPercent.toStringAsFixed(2) : '');
     final stockCtrl = TextEditingController(text: '${p.stock}');
-    final descriptionCtrl = TextEditingController(text: p.description);
+    List<String> tags = p.description.isNotEmpty
+        ? p.description.split(RegExp(r'[,\n]')).map((t) => t.trim()).where((t) => t.isNotEmpty).toList()
+        : [];
+    final tagInputCtrl = TextEditingController();
+    final tagFocusNode = FocusNode();
+    bool isAddingTag = false;
     String emoji = p.emoji;
     String category = _userCategories.contains(p.category) ? p.category : (_userCategories..add(p.category)).last;
+    String unit = kProductUnits.contains(p.unit) ? p.unit : 'pcs';
+    final barcodeNoCtrl = TextEditingController(text: p.barcodeNo);
 
     showDialog(
       context: context,
@@ -7385,7 +7492,8 @@ end tell
                     ),
                   ]),
                 ),
-                Padding(
+                Flexible(
+                  child: SingleChildScrollView(
                   padding: const EdgeInsets.all(28),
                   child: Form(
                     key: formKey,
@@ -7512,6 +7620,12 @@ end tell
                             decoration: _dlgInputDecor('0'),
                           ),
                         ])),
+                        const SizedBox(width: 14),
+                        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          _dlgLabel('UNIT'),
+                          const SizedBox(height: 6),
+                          _unitDropdown(unit, (v) => setLocal(() => unit = v)),
+                        ])),
                       ]),
                       const SizedBox(height: 16),
                       Row(children: [
@@ -7540,16 +7654,92 @@ end tell
                         ])),
                       ]),
                       const SizedBox(height: 16),
-                      _dlgLabel('DESCRIPTION'),
+                      _dlgLabel('TAGS'),
                       const SizedBox(height: 6),
-                      TextFormField(
-                        controller: descriptionCtrl,
-                        maxLines: 3,
-                        minLines: 2,
-                        style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
-                        decoration: _dlgInputDecor('Optional product details, notes, specs…'),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: AppColors.surfaceVariant,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: AppColors.border),
+                        ),
+                        child: Wrap(spacing: 6, runSpacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
+                          ...List.generate(tags.length, (i) {
+                            const tagColors = [
+                              Color(0xFF6366F1), Color(0xFF10B981), Color(0xFFF59E0B),
+                              Color(0xFFEF4444), Color(0xFF3B82F6), Color(0xFFEC4899),
+                              Color(0xFF8B5CF6), Color(0xFF14B8A6), Color(0xFFF97316),
+                            ];
+                            final c = tagColors[i % tagColors.length];
+                            return Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: c.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(color: c.withValues(alpha: 0.4)),
+                              ),
+                              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                Text(tags[i], style: GoogleFonts.inter(fontSize: 12, color: c, fontWeight: FontWeight.w600)),
+                                const SizedBox(width: 5),
+                                GestureDetector(
+                                  onTap: () => setLocal(() => tags.removeAt(i)),
+                                  child: Icon(Icons.close_rounded, size: 13, color: c),
+                                ),
+                              ]),
+                            );
+                          }),
+                          if (isAddingTag)
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: AppColors.surfaceVariant,
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(color: AppColors.primary.withValues(alpha: 0.5)),
+                              ),
+                              child: SizedBox(
+                                width: 160,
+                                child: TextField(
+                                  controller: tagInputCtrl,
+                                  focusNode: tagFocusNode,
+                                  style: GoogleFonts.inter(fontSize: 12, color: AppColors.textDark),
+                                  decoration: InputDecoration(
+                                    hintText: 'Type tag…',
+                                    hintStyle: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted),
+                                    border: InputBorder.none,
+                                    isDense: true,
+                                    contentPadding: EdgeInsets.zero,
+                                  ),
+                                  onSubmitted: (v) {
+                                    final t = v.trim();
+                                    if (t.isNotEmpty && !tags.contains(t)) tags.add(t);
+                                    tagInputCtrl.clear();
+                                    setLocal(() => isAddingTag = false);
+                                  },
+                                ),
+                              ),
+                            )
+                          else
+                            GestureDetector(
+                              onTap: () { setLocal(() => isAddingTag = true); Future.delayed(const Duration(milliseconds: 50), () => tagFocusNode.requestFocus()); },
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                decoration: BoxDecoration(
+                                  color: AppColors.surfaceVariant,
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(color: AppColors.border, style: BorderStyle.solid),
+                                ),
+                                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                  const Icon(Icons.add_rounded, size: 13, color: AppColors.textMuted),
+                                  const SizedBox(width: 4),
+                                  Text('Add tag', style: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted, fontWeight: FontWeight.w500)),
+                                ]),
+                              ),
+                            ),
+                        ]),
                       ),
                     ]),
+                  ),
                   ),
                 ),
                 Container(
@@ -7563,6 +7753,9 @@ end tell
                     ElevatedButton(
                       onPressed: () async {
                         if (!formKey.currentState!.validate()) return;
+                        final newBarcodeNo = barcodeNoCtrl.text.trim().isNotEmpty
+                          ? barcodeNoCtrl.text.trim()
+                          : await LocalDbService.getNextBarcodeNo();
                         final updated = Product(
                           id: p.id,
                           name: nameCtrl.text.trim(),
@@ -7573,7 +7766,9 @@ end tell
                           emoji: emoji,
                           sku: skuCtrl.text.trim().isEmpty ? p.sku : skuCtrl.text.trim(),
                           stock: int.parse(stockCtrl.text),
-                          description: descriptionCtrl.text.trim(),
+                          description: tags.join(', '),
+                          unit: unit,
+                          barcodeNo: newBarcodeNo,
                         );
                         await LocalDbService.updateProduct(updated);
                         ConnectivityService.instance.syncNow();
@@ -7590,7 +7785,7 @@ end tell
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                         elevation: 0,
                       ),
-                      child: Text('Save Changes', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600)),
+                      child: Text('Update Changes', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600)),
                     ),
                   ]),
                 ),
@@ -7615,7 +7810,7 @@ end tell
       if (prefix.length >= 4) break;
     }
     if (prefix.isEmpty) prefix = 'ITEM';
-    prefix = prefix.substring(0, prefix.length.clamp(2, 6));
+    prefix = prefix.substring(0, prefix.length.clamp(1, 6));
     final existing = _products
         .where((p) => excludeId == null || p.id != excludeId)
         .map((p) => p.sku)
@@ -7635,10 +7830,16 @@ end tell
     final buyingPriceCtrl = TextEditingController();
     final taxPercentCtrl = TextEditingController();
     final stockCtrl = TextEditingController();
-    final descriptionCtrl = TextEditingController();
+    List<String> tags = [];
+    final tagInputCtrl = TextEditingController();
+    final tagFocusNode = FocusNode();
+    bool isAddingTag = false;
     String emoji = '';
     String category = _userCategories.isNotEmpty ? _userCategories.first : '';
+    String unit = 'pcs';
+    String barcodeNo = '';
     bool skuAutoMode = true;
+    LocalDbService.getNextBarcodeNo().then((n) { barcodeNo = n; });
 
     nameCtrl.addListener(() {
       if (skuAutoMode && nameCtrl.text.isNotEmpty) {
@@ -7856,32 +8057,20 @@ end tell
                           children: [
                             Expanded(
                               child: Column(
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.start,
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   _dlgLabel('SELLING PRICE ($_currencySymbol)'),
                                   const SizedBox(height: 6),
                                   TextFormField(
                                     controller: priceCtrl,
-                                    keyboardType:
-                                        const TextInputType.numberWithOptions(
-                                            decimal: true),
-                                    inputFormatters: [
-                                      FilteringTextInputFormatter.allow(
-                                          RegExp(r'^\d*\.?\d{0,2}'))
-                                    ],
+                                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                    inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
                                     validator: (v) {
-                                      if (v == null || v.isEmpty) {
-                                        return 'Required';
-                                      }
-                                      if (double.tryParse(v) == null) {
-                                        return 'Invalid number';
-                                      }
+                                      if (v == null || v.isEmpty) return 'Required';
+                                      if (double.tryParse(v) == null) return 'Invalid number';
                                       return null;
                                     },
-                                    style: GoogleFonts.inter(
-                                        fontSize: 13,
-                                        color: AppColors.textDark),
+                                    style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
                                     decoration: _dlgInputDecor('0.00'),
                                   ),
                                 ],
@@ -7890,31 +8079,27 @@ end tell
                             const SizedBox(width: 14),
                             Expanded(
                               child: Column(
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.start,
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   _dlgLabel('STOCK QTY'),
                                   const SizedBox(height: 6),
                                   TextFormField(
                                     controller: stockCtrl,
-                                    keyboardType:
-                                        TextInputType.number,
-                                    inputFormatters: [
-                                      FilteringTextInputFormatter
-                                          .digitsOnly
-                                    ],
-                                    validator: (v) =>
-                                        v != null && v.isNotEmpty
-                                            ? null
-                                            : 'Required',
-                                    style: GoogleFonts.inter(
-                                        fontSize: 13,
-                                        color: AppColors.textDark),
+                                    keyboardType: TextInputType.number,
+                                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                                    validator: (v) => v != null && v.isNotEmpty ? null : 'Required',
+                                    style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
                                     decoration: _dlgInputDecor('0'),
                                   ),
                                 ],
                               ),
                             ),
+                            const SizedBox(width: 14),
+                            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              _dlgLabel('UNIT'),
+                              const SizedBox(height: 6),
+                              _unitDropdown(unit, (v) => setLocal(() => unit = v)),
+                            ])),
                           ],
                         ),
                         const SizedBox(height: 16),
@@ -7957,14 +8142,89 @@ end tell
                           ],
                         ),
                         const SizedBox(height: 16),
-                        _dlgLabel('DESCRIPTION'),
+                        _dlgLabel('TAGS'),
                         const SizedBox(height: 6),
-                        TextFormField(
-                          controller: descriptionCtrl,
-                          maxLines: 3,
-                          minLines: 2,
-                          style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
-                          decoration: _dlgInputDecor('Optional product details, notes, specs…'),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: AppColors.surfaceVariant,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: AppColors.border),
+                          ),
+                          child: Wrap(spacing: 6, runSpacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
+                            ...List.generate(tags.length, (i) {
+                              const tagColors = [
+                                Color(0xFF6366F1), Color(0xFF10B981), Color(0xFFF59E0B),
+                                Color(0xFFEF4444), Color(0xFF3B82F6), Color(0xFFEC4899),
+                                Color(0xFF8B5CF6), Color(0xFF14B8A6), Color(0xFFF97316),
+                              ];
+                              final c = tagColors[i % tagColors.length];
+                              return Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                decoration: BoxDecoration(
+                                  color: c.withValues(alpha: 0.12),
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(color: c.withValues(alpha: 0.4)),
+                                ),
+                                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                  Text(tags[i], style: GoogleFonts.inter(fontSize: 12, color: c, fontWeight: FontWeight.w600)),
+                                  const SizedBox(width: 5),
+                                  GestureDetector(
+                                    onTap: () => setLocal(() => tags.removeAt(i)),
+                                    child: Icon(Icons.close_rounded, size: 13, color: c),
+                                  ),
+                                ]),
+                              );
+                            }),
+                            if (isAddingTag)
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: AppColors.surfaceVariant,
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(color: AppColors.primary.withValues(alpha: 0.5)),
+                                ),
+                                child: SizedBox(
+                                  width: 160,
+                                  child: TextField(
+                                    controller: tagInputCtrl,
+                                    focusNode: tagFocusNode,
+                                    style: GoogleFonts.inter(fontSize: 12, color: AppColors.textDark),
+                                    decoration: InputDecoration(
+                                      hintText: 'Type tag…',
+                                      hintStyle: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted),
+                                      border: InputBorder.none,
+                                      isDense: true,
+                                      contentPadding: EdgeInsets.zero,
+                                    ),
+                                    onSubmitted: (v) {
+                                      final t = v.trim();
+                                      if (t.isNotEmpty && !tags.contains(t)) tags.add(t);
+                                      tagInputCtrl.clear();
+                                      setLocal(() => isAddingTag = false);
+                                    },
+                                  ),
+                                ),
+                              )
+                            else
+                              GestureDetector(
+                                onTap: () { setLocal(() => isAddingTag = true); Future.delayed(const Duration(milliseconds: 50), () => tagFocusNode.requestFocus()); },
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                  decoration: BoxDecoration(
+                                    color: AppColors.surfaceVariant,
+                                    borderRadius: BorderRadius.circular(20),
+                                    border: Border.all(color: AppColors.border),
+                                  ),
+                                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                    const Icon(Icons.add_rounded, size: 13, color: AppColors.textMuted),
+                                    const SizedBox(width: 4),
+                                    Text('Add tag', style: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted, fontWeight: FontWeight.w500)),
+                                  ]),
+                                ),
+                              ),
+                          ]),
                         ),
                       ],
                     ),
@@ -8011,7 +8271,11 @@ end tell
                             emoji: emoji,
                             sku: sku,
                             stock: int.parse(stockCtrl.text),
-                            description: descriptionCtrl.text.trim(),
+                            description: tags.join(', '),
+                            unit: unit,
+                            barcodeNo: barcodeNo.isEmpty
+                              ? await LocalDbService.getNextBarcodeNo()
+                              : barcodeNo,
                           );
                           await LocalDbService.insertProduct(newProduct);
                           ConnectivityService.instance.syncNow();
@@ -8141,6 +8405,97 @@ end tell
             child: Text('Add', style: GoogleFonts.inter(fontWeight: FontWeight.w600)),
           ),
         ],
+      ),
+    );
+  }
+
+  // Hardware keyboard handler — pure-digit sequences go silently to cart
+  bool _handleHardwareKey(KeyEvent event) {
+    if (event is! KeyDownEvent || !mounted) return false;
+    // Only on billing tab (tab 1), not inside a dialog
+    if (_selectedTab != 1) return false;
+    final isDialogOpen = ModalRoute.of(context)?.isCurrent == false;
+    if (isDialogOpen) return false;
+    // If any text field has focus, don't intercept
+    final focus = FocusManager.instance.primaryFocus;
+    if (focus?.context?.widget is EditableText) return false;
+    if (focus == _customerNameFocus || focus == _customerPhoneFocus ||
+        focus == _searchFocus || focus == _addCustomerFocus) return false;
+
+    final logical = event.logicalKey;
+
+    if (logical == LogicalKeyboardKey.enter ||
+        logical == LogicalKeyboardKey.numpadEnter) {
+      final buf = _scanBuffer.trim();
+      _scanBuffer = '';
+      // Only treat as barcode if it's 8+ digits (EAN-8 minimum)
+      if (buf.length >= 8 && RegExp(r'^\d+$').hasMatch(buf)) {
+        Product? match = _products.cast<Product?>().firstWhere(
+          (p) => _barcodeMatches(p!.barcodeNo, buf), orElse: () => null);
+        match ??= _products.cast<Product?>().firstWhere(
+          (p) => p!.sku == buf, orElse: () => null);
+        if (match != null) {
+          context.read<CartProvider>().addProduct(match);
+          _showToast('${match.name} added to cart');
+        } else {
+          _showToast('No product for barcode "$buf"', isError: true);
+        }
+        // Clear search bar in case any digits leaked through
+        setState(() { _searchQuery = ''; _searchController.clear(); });
+        return true; // consume Enter
+      }
+      return false;
+    }
+
+    final char = event.character;
+    if (char != null && RegExp(r'^\d$').hasMatch(char)) {
+      // Digit → buffer it and consume so it doesn't appear in search bar
+      _scanBuffer += char;
+      return true;
+    }
+
+    // Non-digit → clear buffer, let keypress reach search bar / other fields
+    _scanBuffer = '';
+    return false;
+  }
+
+  // Matches stored 12-digit EAN-13 against scanner output (12 or 13 digits)
+  bool _barcodeMatches(String stored, String scanned) {
+    if (stored.isEmpty) return false;
+    if (stored == scanned) return true;
+    // Scanner sends full 13-digit EAN-13 (stored is the 12-digit input)
+    if (scanned.length == 13 && scanned.startsWith(stored)) return true;
+    // Scanner configured as UPC-A: strips leading '0' from EAN-13 before sending
+    // e.g. stored=000000100009, EAN-13=0000001000092, scanner sends=000001000092
+    if (scanned.length == 12) {
+      final withLeadingZero = '0$scanned';
+      if (withLeadingZero.startsWith(stored)) return true;
+    }
+    return false;
+  }
+
+  Widget _unitDropdown(String value, void Function(String) onChanged) {
+    return Container(
+      height: 44,
+      decoration: BoxDecoration(
+        color: AppColors.surfaceVariant,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.border),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: value,
+          isExpanded: true,
+          icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: AppColors.textMuted),
+          dropdownColor: Colors.white,
+          style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w500, color: AppColors.textDark),
+          items: kProductUnits.map((u) => DropdownMenuItem(
+            value: u,
+            child: Text(u, style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark)),
+          )).toList(),
+          onChanged: (v) { if (v != null) onChanged(v); },
+        ),
       ),
     );
   }
@@ -10434,7 +10789,7 @@ class _CartRowState extends State<_CartRow> {
               children: [
                 Text('${widget.currencySymbol}${widget.item.total.toStringAsFixed(2)}',
                     style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.primary)),
-                Text('${widget.currencySymbol}${widget.item.product.price.toStringAsFixed(2)}/unit',
+                Text('${widget.currencySymbol}${widget.item.product.price.toStringAsFixed(2)}/${widget.item.product.unit}',
                     style: GoogleFonts.inter(fontSize: 9, color: AppColors.textMuted.withValues(alpha: 0.6), fontWeight: FontWeight.w300)),
               ],
             ),
@@ -10879,12 +11234,20 @@ class _BarcodePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final barcode = bc.Barcode.code128();
-    final elements = barcode.make(data, width: size.width, height: size.height, drawText: false);
-    final paint = Paint()..color = Colors.black;
-    for (final el in elements) {
-      if (el is bc.BarcodeBar && el.black) {
-        canvas.drawRect(Rect.fromLTWH(el.left, el.top, el.width, el.height), paint);
+    try {
+      final barcode = bc.Barcode.ean13();
+      final elements = barcode.make(data, width: size.width, height: size.height, drawText: false);
+      final paint = Paint()..color = Colors.black;
+      for (final el in elements) {
+        if (el is bc.BarcodeBar && el.black) {
+          canvas.drawRect(Rect.fromLTWH(el.left, el.top, el.width, el.height), paint);
+        }
+      }
+    } catch (_) {
+      // Fallback for non-EAN data: draw placeholder bars
+      final paint = Paint()..color = Colors.black;
+      for (int i = 0; i < 30; i++) {
+        if (i % 2 == 0) canvas.drawRect(Rect.fromLTWH(i * size.width / 30, 0, size.width / 60, size.height), paint);
       }
     }
   }

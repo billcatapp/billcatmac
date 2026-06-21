@@ -1,3 +1,5 @@
+const kProductUnits = ['pcs', 'kg', 'g', 'L', 'mL', 'm', 'ft', 'box', 'dozen', 'pair'];
+
 class Product {
   final String id;
   final String name;
@@ -8,6 +10,9 @@ class Product {
   final String emoji;
   final String sku;
   final int stock;
+  final String description;
+  final String unit;
+  final String barcodeNo;
 
   const Product({
     required this.id,
@@ -19,6 +24,9 @@ class Product {
     required this.emoji,
     required this.sku,
     required this.stock,
+    this.description = '',
+    this.unit = 'pcs',
+    this.barcodeNo = '',
   });
 
   Map<String, dynamic> toMap() => {
@@ -31,6 +39,9 @@ class Product {
     'emoji': emoji,
     'sku': sku,
     'stock': stock,
+    'description': description,
+    'unit': unit,
+    'barcode_no': barcodeNo,
     'synced': 0,
   };
 
@@ -44,12 +55,17 @@ class Product {
     emoji: m['emoji'] as String,
     sku: m['sku'] as String,
     stock: m['stock'] as int,
+    description: (m['description'] as String?) ?? '',
+    unit: (m['unit'] as String?) ?? 'pcs',
+    barcodeNo: (m['barcode_no'] as String?) ?? '',
   );
 
-  Product copyWith({int? stock}) => Product(
+  Product copyWith({int? stock, String? barcodeNo}) => Product(
     id: id, name: name, price: price, buyingPrice: buyingPrice,
     taxPercent: taxPercent, category: category,
     emoji: emoji, sku: sku, stock: stock ?? this.stock,
+    description: description, unit: unit,
+    barcodeNo: barcodeNo ?? this.barcodeNo,
   );
 }
 
