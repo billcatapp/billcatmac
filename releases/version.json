@@ -1,7 +1,7 @@
 {
-  "version": "1.4.11",
-  "download_url": "https://github.com/billcatapp/billcat/releases/download/v1.4.11/BillCat-1.4.11.zip",
-  "dmg_url": "https://github.com/billcatapp/billcat/releases/download/v1.4.11/BillCat-1.4.11.dmg",
-  "release_notes": "E-bill web link in WhatsApp — tap to view your receipt instantly at billcat.in",
+  "version": "1.4.12",
+  "download_url": "https://github.com/billcatapp/billcat/releases/download/v1.4.12/BillCat-1.4.12.zip",
+  "dmg_url": "https://github.com/billcatapp/billcat/releases/download/v1.4.12/BillCat-1.4.12.dmg",
+  "release_notes": "Printer type toggle (Thermal/Regular), colorful product tags, keyboard fixes, e-bill WhatsApp link",
   "mandatory": false
 }
