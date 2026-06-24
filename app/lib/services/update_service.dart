@@ -32,8 +32,10 @@ class UpdateService {
 
       final data = jsonDecode(body) as Map<String, dynamic>;
       final latest = data['version'] as String;
+      final latestBuild = data['build'] as int? ?? 0;
+      final currentBuild = int.tryParse(info.buildNumber) ?? 0;
 
-      if (_isNewer(latest, current)) {
+      if (_isNewer(latest, current) || (latestBuild > 0 && latestBuild > currentBuild)) {
         return UpdateInfo(
           version: latest,
           downloadUrl: data['download_url'] as String,

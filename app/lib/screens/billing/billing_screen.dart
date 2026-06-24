@@ -155,6 +155,7 @@ class _BillingScreenState extends State<BillingScreen> {
   String _utilitiesView = 'Delivery';
   String _salesSearchQuery = '';
   String _customerSearchQuery = '';
+  bool _showCreditOnly = false;
   List<Customer> _reportCustomers = [];
   List<Customer> _savedCustomers = [];
   List<Customer> _nameAcOptions = [];
@@ -165,6 +166,7 @@ class _BillingScreenState extends State<BillingScreen> {
   final _customerNameFocus = FocusNode();
   final _customerPhoneFocus = FocusNode();
   final _addCustomerFocus = FocusNode();
+  final _discountFocus = FocusNode();
 
   // Dynamic categories (user can add more)
   List<String> _userCategories = [];
@@ -191,6 +193,7 @@ class _BillingScreenState extends State<BillingScreen> {
   double _dashProfitToday = 0;
   double _dashProfitWeek  = 0;
   double _dashProfitMonth = 0;
+  double _dashProfitYear  = 0;
 
   // Period selector
   String _dashPeriod = 'Today';
@@ -285,6 +288,9 @@ class _BillingScreenState extends State<BillingScreen> {
   bool _addingCustomProduct = false;
   final _customNameCtrl = TextEditingController();
   final _customPriceCtrl = TextEditingController();
+  final _customNameFocus = FocusNode();
+  final _customPriceFocus = FocusNode();
+  int _customQty = 1;
   String _settingsPage = 'General';
   String _editStoreName = 'BillCat Store';
   String _editStoreAddress = '';
@@ -589,6 +595,7 @@ class _BillingScreenState extends State<BillingScreen> {
     final profitToday = calcProfit(todayTx);
     final profitWeek  = calcProfit(weekTx);
     final profitMonth = calcProfit(monthTx);
+    final profitYear  = calcProfit(yearTx);
 
     // ── Chart bars ────────────────────────────────────────────────────────────
     // Today: 8 three-hour slots
@@ -680,6 +687,7 @@ class _BillingScreenState extends State<BillingScreen> {
       _dashProfitToday = profitToday;
       _dashProfitWeek  = profitWeek;
       _dashProfitMonth = profitMonth;
+      _dashProfitYear  = profitYear;
     });
   }
 
@@ -700,8 +708,11 @@ class _BillingScreenState extends State<BillingScreen> {
     _customerNameFocus.dispose();
     _customerPhoneFocus.dispose();
     _addCustomerFocus.dispose();
+    _discountFocus.dispose();
     _customNameCtrl.dispose();
     _customPriceCtrl.dispose();
+    _customNameFocus.dispose();
+    _customPriceFocus.dispose();
     super.dispose();
   }
 
@@ -1187,9 +1198,7 @@ class _BillingScreenState extends State<BillingScreen> {
                             context.read<CartProvider>().addProduct(match);
                             setState(() { _searchQuery = ''; _searchController.clear(); });
                             _showToast('${match.name} added to cart');
-                            Future.delayed(const Duration(milliseconds: 50), () {
-                              if (mounted) _searchFocus.requestFocus();
-                            });
+                            _searchFocus.unfocus();
                           }
                         }
                       },
@@ -1441,6 +1450,7 @@ class _BillingScreenState extends State<BillingScreen> {
                         _customerPhoneCtrl.clear();
                         cart.customerName = '';
                         cart.customerPhone = '';
+                        setState(() {});
                       },
                       child: Container(
                         width: 42,
@@ -1713,7 +1723,7 @@ class _BillingScreenState extends State<BillingScreen> {
                           Text('No items added', style: GoogleFonts.inter(color: AppColors.textMuted, fontSize: 13)),
                           const SizedBox(height: 14),
                           OutlinedButton.icon(
-                            onPressed: () => setState(() { _addingCustomProduct = true; _customNameCtrl.clear(); _customPriceCtrl.clear(); }),
+                            onPressed: () { setState(() { _addingCustomProduct = true; _customQty = 1; _customNameCtrl.clear(); _customPriceCtrl.clear(); }); Future.microtask(() => _customNameFocus.requestFocus()); },
                             icon: const Icon(Icons.add_rounded, size: 15),
                             label: Text('Custom Product', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
                             style: OutlinedButton.styleFrom(
@@ -1753,7 +1763,7 @@ class _BillingScreenState extends State<BillingScreen> {
       padding: const EdgeInsets.symmetric(
           horizontal: 16, vertical: 12),
       child: OutlinedButton.icon(
-        onPressed: () => setState(() { _addingCustomProduct = true; _customNameCtrl.clear(); _customPriceCtrl.clear(); }),
+        onPressed: () { setState(() { _addingCustomProduct = true; _customQty = 1; _customNameCtrl.clear(); _customPriceCtrl.clear(); }); Future.microtask(() => _customNameFocus.requestFocus()); },
         icon: const Icon(Icons.add, size: 18, color: AppColors.primary),
         label: Text('CUSTOM PRODUCT',
             style: GoogleFonts.inter(
@@ -1776,68 +1786,107 @@ class _BillingScreenState extends State<BillingScreen> {
       final name = _customNameCtrl.text.trim();
       final price = double.tryParse(_customPriceCtrl.text) ?? 0;
       if (name.isNotEmpty && price > 0) {
-        cart.addProduct(Product(
+        final product = Product(
           id: DateTime.now().millisecondsSinceEpoch.toString(),
           name: name, price: price,
           category: 'Custom', emoji: '📦', sku: 'CUSTOM', stock: 99,
-        ));
+        );
+        for (int i = 0; i < _customQty; i++) cart.addProduct(product);
         setState(() => _addingCustomProduct = false);
       }
     }
 
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF8F8FF),
-        border: Border.all(color: AppColors.primary.withOpacity(0.3)),
-        borderRadius: BorderRadius.circular(10),
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+      child: Row(
+        children: [
+          // Name field (no SKU line)
+          Expanded(
+            child: TextField(
+              controller: _customNameCtrl,
+              focusNode: _customNameFocus,
+              maxLines: 1,
+              style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.primary),
+              decoration: InputDecoration.collapsed(
+                hintText: 'Item name',
+                hintStyle: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textMuted),
+              ),
+              onSubmitted: (_) => Future.microtask(() => _customPriceFocus.requestFocus()),
+            ),
+          ),
+          const SizedBox(width: 8),
+          // Qty controls
+          Container(
+            width: 90,
+            padding: const EdgeInsets.all(3),
+            decoration: BoxDecoration(
+              color: AppColors.surfaceVariant,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: AppColors.border),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                GestureDetector(
+                  onTap: () { if (_customQty > 1) setState(() => _customQty--); },
+                  child: Container(
+                    width: 22, height: 22,
+                    alignment: Alignment.center,
+                    child: Icon(Icons.remove, size: 14,
+                        color: _customQty > 1 ? AppColors.primary : AppColors.textMuted.withValues(alpha: 0.3)),
+                  ),
+                ),
+                SizedBox(
+                  width: 32,
+                  child: Text('$_customQty', textAlign: TextAlign.center,
+                      style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.primary)),
+                ),
+                GestureDetector(
+                  onTap: () => setState(() => _customQty++),
+                  child: Container(
+                    width: 22, height: 22,
+                    alignment: Alignment.center,
+                    child: Icon(Icons.add, size: 14, color: AppColors.primary),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          // Price field
+          SizedBox(
+            width: 82,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                TextField(
+                  controller: _customPriceCtrl,
+                  focusNode: _customPriceFocus,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
+                  textAlign: TextAlign.right,
+                  style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.primary),
+                  decoration: InputDecoration.collapsed(
+                    hintText: '0.00',
+                    hintStyle: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textMuted),
+                  ),
+                  onSubmitted: (_) => confirm(),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: confirm,
+            child: Icon(Icons.check_circle_rounded, size: 20, color: AppColors.primary),
+          ),
+          const SizedBox(width: 6),
+          GestureDetector(
+            onTap: () => setState(() => _addingCustomProduct = false),
+            child: Icon(Icons.close_rounded, size: 18, color: AppColors.textMuted.withValues(alpha: 0.5)),
+          ),
+        ],
       ),
-      child: Row(children: [
-        const Text('📦', style: TextStyle(fontSize: 18)),
-        const SizedBox(width: 10),
-        Expanded(
-          flex: 5,
-          child: TextField(
-            controller: _customNameCtrl,
-            autofocus: true,
-            style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w500),
-            decoration: InputDecoration.collapsed(hintText: 'Item name', hintStyle: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted)),
-            onSubmitted: (_) => confirm(),
-          ),
-        ),
-        const SizedBox(width: 8),
-        SizedBox(
-          width: 80,
-          child: TextField(
-            controller: _customPriceCtrl,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
-            style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600),
-            decoration: InputDecoration.collapsed(hintText: 'Price', hintStyle: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted)),
-            textAlign: TextAlign.right,
-            onSubmitted: (_) => confirm(),
-          ),
-        ),
-        const SizedBox(width: 8),
-        GestureDetector(
-          onTap: confirm,
-          child: Container(
-            width: 28, height: 28,
-            decoration: BoxDecoration(color: AppColors.primary, borderRadius: BorderRadius.circular(6)),
-            child: const Icon(Icons.check_rounded, size: 16, color: Colors.white),
-          ),
-        ),
-        const SizedBox(width: 6),
-        GestureDetector(
-          onTap: () => setState(() => _addingCustomProduct = false),
-          child: Container(
-            width: 28, height: 28,
-            decoration: BoxDecoration(color: AppColors.border, borderRadius: BorderRadius.circular(6)),
-            child: const Icon(Icons.close_rounded, size: 16, color: AppColors.textMuted),
-          ),
-        ),
-      ]),
     );
   }
 
@@ -1868,10 +1917,10 @@ class _BillingScreenState extends State<BillingScreen> {
                       color: AppColors.textMuted,
                       letterSpacing: 1.5)),
               const SizedBox(width: 10),
-              _DiscountToggle(cart: cart, currencySymbol: _currencySymbol),
+              _DiscountToggle(cart: cart, currencySymbol: _currencySymbol, focusNode: _discountFocus),
               const Spacer(),
               Text(
-                  '-$_currencySymbol${cart.discountAmount.toStringAsFixed(2)}',
+                  '-${_fmtComma(cart.discountAmount)}',
                   style: GoogleFonts.inter(
                       fontSize: 13,
                       color: AppColors.success,
@@ -1896,7 +1945,7 @@ class _BillingScreenState extends State<BillingScreen> {
                           letterSpacing: 1.5)),
                   const SizedBox(height: 2),
                   Text(
-                      '$_currencySymbol${cart.total.toStringAsFixed(2)}',
+                      _fmtComma(cart.total),
                       style: GoogleFonts.manrope(
                           fontSize: 28,
                           fontWeight: FontWeight.w900,
@@ -1906,8 +1955,7 @@ class _BillingScreenState extends State<BillingScreen> {
               ),
               const Spacer(),
               Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 12, vertical: 5),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
                 decoration: BoxDecoration(
                   color: AppColors.surfaceVariant,
                   borderRadius: BorderRadius.circular(100),
@@ -1915,10 +1963,8 @@ class _BillingScreenState extends State<BillingScreen> {
                 ),
                 child: Text('${cart.itemCount} ITEMS',
                     style: GoogleFonts.inter(
-                        fontSize: 9,
-                        fontWeight: FontWeight.w500,
-                        color: AppColors.textMuted,
-                        letterSpacing: 1.0)),
+                        fontSize: 9, fontWeight: FontWeight.w700,
+                        color: AppColors.textMuted, letterSpacing: 1.0)),
               ),
             ],
           ),
@@ -1937,7 +1983,7 @@ class _BillingScreenState extends State<BillingScreen> {
                 color: AppColors.textMuted,
                 letterSpacing: 1.5)),
         const Spacer(),
-        Text('$_currencySymbol${amount.toStringAsFixed(2)}',
+        Text(_fmtComma(amount),
             style: GoogleFonts.inter(
                 fontSize: 13,
                 fontWeight: FontWeight.w700,
@@ -5460,11 +5506,18 @@ class _BillingScreenState extends State<BillingScreen> {
     bool sendWaAfterClose = false;
     final hasPhone = cart.customerPhone.isNotEmpty;
     final hasWa = _waPhoneNumberId.isNotEmpty && _waAccessToken.isNotEmpty;
+    final total = cart.total;
+    final paidCtrl = TextEditingController(text: total.toStringAsFixed(2));
+    final paidFocus = FocusNode();
 
     showDialog(
       context: context,
       builder: (_) => StatefulBuilder(
-        builder: (ctx, setLocal) => AlertDialog(
+        builder: (ctx, setLocal) {
+          final paid = double.tryParse(paidCtrl.text) ?? total;
+          final credit = (total - paid).clamp(0.0, total);
+          final change = (paid - total).clamp(0.0, double.infinity);
+          return AlertDialog(
           shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(16)),
           title: Row(children: [
@@ -5479,10 +5532,60 @@ class _BillingScreenState extends State<BillingScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // Total row
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('Total', style: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted)),
+                  Text(_fmtComma(total), style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700)),
+                ],
+              ),
+              const SizedBox(height: 12),
+              // Amount Paid field
+              Text('Amount Paid', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.textMuted, letterSpacing: 1)),
+              const SizedBox(height: 6),
+              TextField(
+                controller: paidCtrl,
+                focusNode: paidFocus,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
+                style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.w700),
+                decoration: InputDecoration(
+                  prefixText: '$_currencySymbol ',
+                  prefixStyle: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.w700, color: AppColors.textMuted),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                  focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: const BorderSide(color: AppColors.primary, width: 2)),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                ),
+                onChanged: (_) => setLocal(() {}),
+              ),
+              if (credit > 0 || change > 0) ...[
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: credit > 0 ? const Color(0xFFFFF3E0) : const Color(0xFFE8F5E9),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(credit > 0 ? 'Credit (due)' : 'Change',
+                          style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600,
+                              color: credit > 0 ? const Color(0xFFE65100) : AppColors.success)),
+                      Text(_fmtComma(credit > 0 ? credit : change),
+                          style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w800,
+                              color: credit > 0 ? const Color(0xFFE65100) : AppColors.success)),
+                    ],
+                  ),
+                ),
+              ],
+              const SizedBox(height: 4),
               Text(
-                'Charge $_currencySymbol${cart.total.toStringAsFixed(2)} for ${cart.itemCount} item(s)?',
-                style: GoogleFonts.inter(
-                    color: AppColors.textMuted, fontSize: 14),
+                '${cart.itemCount} item(s)',
+                style: GoogleFonts.inter(color: AppColors.textMuted, fontSize: 12),
               ),
               if (hasPhone && hasWa) ...[
                 const SizedBox(height: 14),
@@ -5533,8 +5636,12 @@ class _BillingScreenState extends State<BillingScreen> {
                 final txId = _queuedTransactionId.isNotEmpty ? _queuedTransactionId : Uuid().v4();
                 final snapshot = _snapshotCart(cart, invoiceNumber: invNum, transactionId: txId);
                 final phone = cart.customerPhone;
+                final creditDue = (total - (double.tryParse(paidCtrl.text) ?? total)).clamp(0.0, total);
                 Navigator.pop(ctx);
                 await cart.checkout(invoiceNumber: invNum, transactionId: txId);
+                if (creditDue > 0 && phone.isNotEmpty) {
+                  await LocalDbService.addCreditToCustomer(phone, creditDue);
+                }
                 await ConnectivityService.instance.syncNow();
                 _refreshQueuedInvoiceNo();
                 _customerNameCtrl.clear();
@@ -5542,7 +5649,11 @@ class _BillingScreenState extends State<BillingScreen> {
                 _loadProducts();
                 _loadDashboardData();
                 if (!context.mounted) return;
-                _showToast('Payment successful!');
+                if (creditDue > 0) {
+                  _showToast('Bill closed · $_currencySymbol${creditDue.toStringAsFixed(2)} credit recorded');
+                } else {
+                  _showToast('Payment successful!');
+                }
                 if (_autoPrint) {
                   await _printRecord(snapshot);
                 }
@@ -5563,9 +5674,11 @@ class _BillingScreenState extends State<BillingScreen> {
                       fontWeight: FontWeight.w600)),
             ),
           ],
-        ),
+        );
+        }
       ),
     );
+    Future.microtask(() => paidFocus.requestFocus());
   }
 
   Future<void> _autoSavePdf(TransactionRecord tx) async {
@@ -8419,8 +8532,10 @@ end tell
     // If any text field has focus, don't intercept
     final focus = FocusManager.instance.primaryFocus;
     if (focus?.context?.widget is EditableText) return false;
-    if (focus == _customerNameFocus || focus == _customerPhoneFocus ||
-        focus == _searchFocus || focus == _addCustomerFocus) return false;
+    if (_customerNameFocus.hasFocus || _customerPhoneFocus.hasFocus ||
+        _searchFocus.hasFocus || _addCustomerFocus.hasFocus ||
+        _discountFocus.hasFocus || _customNameFocus.hasFocus ||
+        _customPriceFocus.hasFocus) return false;
 
     final logical = event.logicalKey;
 
@@ -8545,6 +8660,19 @@ end tell
     return '$_currencySymbol${v.toStringAsFixed(0)}';
   }
 
+  // Indian comma format: 1,00,000.00
+  String _fmtComma(double v) {
+    final parts = v.toStringAsFixed(2).split('.');
+    String intPart = parts[0];
+    if (intPart.length > 3) {
+      final last3 = intPart.substring(intPart.length - 3);
+      final rest = intPart.substring(0, intPart.length - 3);
+      final grouped = rest.replaceAllMapped(RegExp(r'(\d)(?=(\d{2})+$)'), (m) => '${m[1]},');
+      intPart = '$grouped,$last3';
+    }
+    return '$_currencySymbol$intPart.${parts[1]}';
+  }
+
   Widget _buildBarChart(List<(String, double)> bars) =>
       _PremiumBarChart(bars: bars, currencySymbol: _currencySymbol);
 
@@ -8570,11 +8698,11 @@ end tell
       'This Year'  => _dashYearItems,
       _            => _dashItemsSold,
     };
-    final pAvg = switch (_dashPeriod) {
-      'This Week'  => _dashWeekAvg,
-      'This Month' => _dashMonthAvg,
-      'This Year'  => _dashYearAvg,
-      _            => _dashAvgOrder,
+    final pProfit = switch (_dashPeriod) {
+      'This Week'  => _dashProfitWeek,
+      'This Month' => _dashProfitMonth,
+      'This Year'  => _dashProfitYear,
+      _            => _dashProfitToday,
     };
     final pBars = switch (_dashPeriod) {
       'This Week'  => _chartBarsWeek,
@@ -8661,7 +8789,7 @@ end tell
 
           // ── Metric cards ──
           Row(children: [
-            _metricCard('Total Sales', '$_currencySymbol${pSales.toStringAsFixed(2)}',
+            _metricCard('Total Sales', _fmtComma(pSales),
                 Icons.attach_money_rounded, AppColors.accent, pVsLabel,
                 currencyIcon: _currencySymbol),
             const SizedBox(width: 16),
@@ -8671,7 +8799,7 @@ end tell
             _metricCard('Items Sold', '$pItems',
                 Icons.shopping_bag_outlined, const Color(0xFF10B981), '$_dashPeriod'),
             const SizedBox(width: 16),
-            _metricCard('Avg Order', '$_currencySymbol${pAvg.toStringAsFixed(2)}',
+            _metricCard('Profit', _fmtComma(pProfit),
                 Icons.trending_up_rounded, const Color(0xFF8B5CF6), '$_dashPeriod',
                 currencyIcon: _currencySymbol),
           ]),
@@ -8698,7 +8826,7 @@ end tell
                           fontSize: 12, color: AppColors.textMuted)),
                 ]),
                 const SizedBox(height: 4),
-                Text('$_currencySymbol${pSales.toStringAsFixed(2)} total  •  $pTx transactions',
+                Text('${_fmtComma(pSales)} total  •  $pTx transactions',
                     style: GoogleFonts.inter(
                         fontSize: 12, fontWeight: FontWeight.w300,
                         color: AppColors.textMuted)),
@@ -8806,7 +8934,7 @@ end tell
                               Row(children: [
                                 Text(c.$1, style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.textDark)),
                                 const Spacer(),
-                                Text('$_currencySymbol${c.$2.toStringAsFixed(2)}', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textDark)),
+                                Text(_fmtComma(c.$2), style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.textDark)),
                               ]),
                               const SizedBox(height: 6),
                               ClipRRect(
@@ -8891,7 +9019,7 @@ end tell
                                     style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w300, color: AppColors.textMuted))),
                                 Expanded(flex: 1, child: Text('$itemCount',
                                     style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w500, color: AppColors.textDark))),
-                                Expanded(flex: 2, child: Text('$_currencySymbol${tx.total.toStringAsFixed(2)}',
+                                Expanded(flex: 2, child: Text(_fmtComma(tx.total),
                                     textAlign: TextAlign.right,
                                     style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textDark))),
                               ]),
@@ -9574,6 +9702,9 @@ end tell
 
   void _showCustomerDetail(Customer c) async {
     final txs = await LocalDbService.getTransactionsByCustomer(c.name, c.phone);
+    final creditBalance = c.phone?.isNotEmpty == true
+        ? await LocalDbService.getCustomerCredit(c.phone!)
+        : c.creditBalance;
     if (!mounted) return;
     final totalSpent = txs.fold<double>(0, (s, t) => s + t.total);
 
@@ -9606,7 +9737,7 @@ end tell
                     ),
                   ])),
                   Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                    Text('$_currencySymbol${totalSpent.toStringAsFixed(2)}',
+                    Text(_fmtComma(totalSpent),
                         style: GoogleFonts.manrope(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.primary)),
                     const SizedBox(height: 2),
                     Text('lifetime spent', style: GoogleFonts.inter(fontSize: 11, color: AppColors.textMuted)),
@@ -9619,6 +9750,22 @@ end tell
                   _custStatChip(Icons.receipt_long_outlined, '${txs.length} orders'),
                   const SizedBox(width: 8),
                   _custStatChip(Icons.calendar_today_outlined, 'Since ${_fmtDate(c.createdAt)}'),
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: creditBalance > 0 ? const Color(0xFFFFF3E0) : const Color(0xFFF1F5F9),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.account_balance_wallet_outlined, size: 12,
+                          color: creditBalance > 0 ? const Color(0xFFE65100) : AppColors.textMuted),
+                      const SizedBox(width: 5),
+                      Text('Due ${_fmtComma(creditBalance)}',
+                          style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600,
+                              color: creditBalance > 0 ? const Color(0xFFE65100) : AppColors.textMuted)),
+                    ]),
+                  ),
                 ]),
               ),
               const Divider(height: 1, color: AppColors.border),
@@ -9660,7 +9807,7 @@ end tell
                                 ])),
                                 const SizedBox(width: 12),
                                 Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                                  Text('$_currencySymbol${t.total.toStringAsFixed(2)}',
+                                  Text(_fmtComma(t.total),
                                       style: GoogleFonts.manrope(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.textDark)),
                                   const SizedBox(height: 2),
                                   Container(
@@ -9959,6 +10106,7 @@ end tell
     final now = DateTime.now();
     final newThisMonth = _reportCustomers.where((c) =>
         c.createdAt.year == now.year && c.createdAt.month == now.month).length;
+    final totalCredit = _reportCustomers.fold<double>(0, (s, c) => s + c.creditBalance);
 
     return Column(
       children: [
@@ -9968,6 +10116,19 @@ end tell
           _reportSummaryCard('With Phone',       '$withPhone',    Icons.phone_outlined,          AppColors.accent),
           const SizedBox(width: 16),
           _reportSummaryCard('New This Month',   '$newThisMonth', Icons.person_add_alt_1_outlined, const Color(0xFF8B5CF6)),
+          if (totalCredit > 0) ...[
+            const SizedBox(width: 16),
+            GestureDetector(
+              onTap: () => setState(() => _showCreditOnly = !_showCreditOnly),
+              child: Container(
+                decoration: _showCreditOnly ? BoxDecoration(
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: const Color(0xFFE65100), width: 2),
+                ) : null,
+                child: _reportSummaryCard('Total Credit Due', _fmtComma(totalCredit), Icons.account_balance_wallet_outlined, const Color(0xFFE65100)),
+              ),
+            ),
+          ],
         ]),
         const SizedBox(height: 24),
         Container(
@@ -9979,7 +10140,16 @@ end tell
               Row(children: [
                 Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Text('All Customers', style: GoogleFonts.manrope(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textDark)),
-                  Text('${_reportCustomers.length} records', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w300, color: AppColors.textMuted)),
+                  Text(_showCreditOnly ? 'Showing credit due customers' : '${_reportCustomers.length} records',
+                      style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w300,
+                          color: _showCreditOnly ? const Color(0xFFE65100) : AppColors.textMuted)),
+                  if (_showCreditOnly) ...[
+                    const SizedBox(width: 6),
+                    GestureDetector(
+                      onTap: () => setState(() => _showCreditOnly = false),
+                      child: const Icon(Icons.close_rounded, size: 14, color: Color(0xFFE65100)),
+                    ),
+                  ],
                 ])),
                 const SizedBox(width: 16),
                 SizedBox(
@@ -10025,6 +10195,7 @@ end tell
                   Expanded(flex: 1, child: _dashColHeader('#')),
                   Expanded(flex: 4, child: _dashColHeader('NAME')),
                   Expanded(flex: 3, child: _dashColHeader('PHONE')),
+                  Expanded(flex: 3, child: _dashColHeader('CREDIT DUE')),
                   Expanded(flex: 3, child: _dashColHeader('ADDED ON', right: true)),
                 ]),
               ),
@@ -10038,13 +10209,15 @@ end tell
                 )
               else
                 ...(() {
-                  final filtered = _customerSearchQuery.isEmpty
-                      ? _reportCustomers
-                      : _reportCustomers.where((c) {
-                          final q = _customerSearchQuery.toLowerCase();
-                          return c.name.toLowerCase().contains(q) ||
-                              (c.phone?.toLowerCase().contains(q) ?? false);
-                        }).toList();
+                  var filtered = _showCreditOnly
+                      ? _reportCustomers.where((c) => c.creditBalance > 0).toList()
+                      : _reportCustomers;
+                  if (_customerSearchQuery.isNotEmpty) {
+                    final q = _customerSearchQuery.toLowerCase();
+                    filtered = filtered.where((c) =>
+                        c.name.toLowerCase().contains(q) ||
+                        (c.phone?.toLowerCase().contains(q) ?? false)).toList();
+                  }
                   if (filtered.isEmpty) return [
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 32),
@@ -10067,6 +10240,17 @@ end tell
                             c.phone?.isNotEmpty == true ? c.phone! : '—',
                             style: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted),
                           )),
+                          Expanded(flex: 3, child: c.creditBalance > 0
+                            ? Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFFFF3E0),
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: Text(_fmtComma(c.creditBalance),
+                                    style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w700, color: const Color(0xFFE65100))),
+                              )
+                            : Text('—', style: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted))),
                           Expanded(flex: 3, child: Row(mainAxisAlignment: MainAxisAlignment.end, children: [
                             Text(
                               _fmtDate(c.createdAt),
@@ -10822,7 +11006,8 @@ class _CartRowState extends State<_CartRow> {
 class _DiscountToggle extends StatefulWidget {
   final CartProvider cart;
   final String currencySymbol;
-  const _DiscountToggle({required this.cart, required this.currencySymbol});
+  final FocusNode focusNode;
+  const _DiscountToggle({required this.cart, required this.currencySymbol, required this.focusNode});
   @override
   State<_DiscountToggle> createState() => _DiscountToggleState();
 }
@@ -10835,13 +11020,16 @@ class _DiscountToggleState extends State<_DiscountToggle> {
   void _onTypeBtn(DiscountType type) {
     setState(() {
       if (_type == type && _showInput) {
-        // tapping active type again collapses
         _showInput = false;
+        widget.focusNode.unfocus();
       } else {
         _type = type;
         _showInput = true;
       }
     });
+    if (_showInput) {
+      Future.microtask(() => widget.focusNode.requestFocus());
+    }
   }
 
   void _apply() {
@@ -10885,7 +11073,7 @@ class _DiscountToggleState extends State<_DiscountToggle> {
                       height: 28,
                       child: TextField(
                         controller: _ctrl,
-                        autofocus: true,
+                        focusNode: widget.focusNode,
                         keyboardType: TextInputType.number,
                         inputFormatters: [
                           FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))

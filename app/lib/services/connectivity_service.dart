@@ -159,6 +159,7 @@ class ConnectivityService extends ChangeNotifier {
               'name': c.name,
               'phone': c.phone,
               'created_at': c.createdAt.toIso8601String(),
+              'credit_balance': c.creditBalance,
             }).toList(),
           );
           for (final c in unsyncedCustomers) {
@@ -279,6 +280,7 @@ class ConnectivityService extends ChangeNotifier {
                 id: r['id'],
                 name: r['name'],
                 phone: r['phone'],
+                creditBalance: (r['credit_balance'] as num?)?.toDouble() ?? 0,
                 createdAt: DateTime.parse(r['created_at']),
                 synced: true,
               ))

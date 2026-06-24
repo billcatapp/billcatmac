@@ -1,7 +1,7 @@
 {
-  "version": "1.4.7",
-  "download_url": "https://github.com/billcatapp/billcat/releases/download/v1.4.7/BillCat-1.4.7.zip",
-  "dmg_url": "https://github.com/billcatapp/billcat/releases/download/v1.4.7/BillCat-1.4.7.dmg",
-  "release_notes": "WhatsApp invoice links, BillCat ID in settings, improved barcode label printing",
+  "version": "1.4.8",
+  "download_url": "https://github.com/billcatapp/billcat/releases/download/v1.4.8/BillCat-1.4.8.zip",
+  "dmg_url": "https://github.com/billcatapp/billcat/releases/download/v1.4.8/BillCat-1.4.8.dmg",
+  "release_notes": "Sequential invoice numbers, print fix, barcode improvements",
   "mandatory": false
 }

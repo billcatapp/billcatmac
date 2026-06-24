@@ -35,7 +35,7 @@ class LocalDbService {
     final dbPath = await _appSupportPath();
     return openDatabase(
       join(dbPath, 'billcat_$userId.db'),
-      version: 12,
+      version: 13,
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 4) {
           try { await db.execute('ALTER TABLE products ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0'); } catch (_) {}
@@ -78,6 +78,9 @@ class LocalDbService {
         }
         if (oldVersion < 12) {
           try { await db.execute("ALTER TABLE products ADD COLUMN barcode_no TEXT NOT NULL DEFAULT ''"); } catch (_) {}
+        }
+        if (oldVersion < 13) {
+          try { await db.execute("ALTER TABLE customers ADD COLUMN credit_balance REAL NOT NULL DEFAULT 0"); } catch (_) {}
         }
       },
       onCreate: (db, _) => _createTables(db),
@@ -125,6 +128,7 @@ class LocalDbService {
         name TEXT NOT NULL,
         phone TEXT,
         address TEXT NOT NULL DEFAULT '',
+        credit_balance REAL NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         synced INTEGER NOT NULL DEFAULT 0
       )
@@ -501,6 +505,22 @@ class LocalDbService {
   static Future<void> deleteCustomer(String id) async {
     final database = await db;
     await database.delete('customers', where: 'id = ?', whereArgs: [id]);
+  }
+
+  static Future<double> getCustomerCredit(String phone) async {
+    final database = await db;
+    final rows = await database.query('customers',
+        columns: ['credit_balance'], where: 'phone = ?', whereArgs: [phone]);
+    if (rows.isEmpty) return 0;
+    return (rows.first['credit_balance'] as num?)?.toDouble() ?? 0;
+  }
+
+  static Future<void> addCreditToCustomer(String phone, double amount) async {
+    final database = await db;
+    await database.rawUpdate(
+      'UPDATE customers SET credit_balance = credit_balance + ?, synced = 0 WHERE phone = ?',
+      [amount, phone],
+    );
   }
 
   static Future<List<TransactionRecord>> getTransactionsByCustomer(String name, String? phone) async {

@@ -1,7 +1,1 @@
-{
-  "version": "1.4.12",
-  "download_url": "https://github.com/billcatapp/billcat/releases/download/v1.4.12/BillCat-1.4.12.zip",
-  "dmg_url": "https://github.com/billcatapp/billcat/releases/download/v1.4.12/BillCat-1.4.12.dmg",
-  "release_notes": "Printer type toggle (Thermal/Regular), colorful product tags, keyboard fixes, e-bill WhatsApp link",
-  "mandatory": false
-}
+{"version":"1.4.13","download_url":"https://github.com/billcatapp/billcat/releases/download/v1.4.13/BillCat-1.4.13.zip","dmg_url":"https://github.com/billcatapp/billcat/releases/download/v1.4.13/BillCat-1.4.13.dmg","release_notes":"Credit due system, Indian comma formatting, customer credit tracking, profit dashboard metric","mandatory":false}

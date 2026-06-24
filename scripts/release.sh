@@ -5,7 +5,7 @@ set -e
 SUPABASE_URL="https://xawpxbhglzhaibmcpwho.supabase.co"
 SUPABASE_SERVICE_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhhd3B4YmhnbHpoYWlibWNwd2hvIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NzExMDgxMywiZXhwIjoyMDkyNjg2ODEzfQ.c3tDKWQeoNsThn0hf1Cq-GBnQgNrFhtx0zS9A6RypO8"
 BUCKET="billcat-updates"
-GITHUB_TOKEN="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"
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"  # set via: export GITHUB_TOKEN=ghp_...
 GITHUB_REPO="billcatapp/billcat"
 APP_DIR="/Users/fouzehh/Documents/BillCat/app"
 RELEASES_DIR="/Users/fouzehh/Documents/BillCat/releases"
@@ -165,6 +165,7 @@ echo "        Uploaded DMG → $DMG_URL"
 echo "[ 6/7 ] Publishing version.json..."
 VERSION_JSON="{
   \"version\": \"$VERSION\",
+  \"build\": $NEW_BUILD,
   \"download_url\": \"$ZIP_URL\",
   \"dmg_url\": \"$DMG_URL\",
   \"release_notes\": \"$NOTES\",
