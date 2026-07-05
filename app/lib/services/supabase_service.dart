@@ -17,6 +17,14 @@ static Future<AuthResponse> signIn(String email, String password) async {
     );
   }
 
+  static Future<void> sendSignupOtp(String email) async {
+    await client.auth.signInWithOtp(
+      email: email.trim().toLowerCase(),
+      shouldCreateUser: true,
+    );
+  }
+
+
   static Future<void> signOut() async {
     await client.auth.signOut();
   }
@@ -63,13 +71,17 @@ static Future<AuthResponse> signIn(String email, String password) async {
     await client.auth.verifyOTP(
       email: email.trim().toLowerCase(),
       token: token.trim(),
-      type: OtpType.signup,
+      type: OtpType.email,
     );
+  }
+
+  static Future<void> setPasswordAfterOtp(String password) async {
+    await client.auth.updateUser(UserAttributes(password: password));
   }
 
   static Future<void> resendOtp(String email) async {
     await client.auth.resend(
-      type: OtpType.signup,
+      type: OtpType.email,
       email: email.trim().toLowerCase(),
     );
   }

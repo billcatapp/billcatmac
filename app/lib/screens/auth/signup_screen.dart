@@ -3,7 +3,6 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../constants/app_colors.dart';
 import '../../services/supabase_service.dart';
-import 'complete_profile_screen.dart';
 import 'login_screen.dart';
 import 'otp_verification_screen.dart';
 
@@ -54,14 +53,14 @@ class _SignupScreenState extends State<SignupScreen> {
     } catch (_) {}
 
     try {
-      await SupabaseService.signUp(
-        _emailCtrl.text.trim(),
-        _passwordCtrl.text,
-      );
+      await SupabaseService.sendSignupOtp(_emailCtrl.text.trim());
       if (!mounted) return;
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => OtpVerificationScreen(email: _emailCtrl.text.trim())),
+        MaterialPageRoute(builder: (_) => OtpVerificationScreen(
+          email: _emailCtrl.text.trim(),
+          password: _passwordCtrl.text,
+        )),
       );
     } on AuthException catch (e) {
       _showError(e.message.contains('already registered')

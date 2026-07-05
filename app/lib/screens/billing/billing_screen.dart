@@ -10118,14 +10118,29 @@ end tell
           _reportSummaryCard('New This Month',   '$newThisMonth', Icons.person_add_alt_1_outlined, const Color(0xFF8B5CF6)),
           if (totalCredit > 0) ...[
             const SizedBox(width: 16),
-            GestureDetector(
-              onTap: () => setState(() => _showCreditOnly = !_showCreditOnly),
-              child: Container(
-                decoration: _showCreditOnly ? BoxDecoration(
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: const Color(0xFFE65100), width: 2),
-                ) : null,
-                child: _reportSummaryCard('Total Credit Due', _fmtComma(totalCredit), Icons.account_balance_wallet_outlined, const Color(0xFFE65100)),
+            Expanded(
+              child: GestureDetector(
+                onTap: () => setState(() => _showCreditOnly = !_showCreditOnly),
+                child: Container(
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: _showCreditOnly ? const Color(0xFFE65100) : AppColors.border, width: _showCreditOnly ? 2 : 1),
+                  ),
+                  child: Row(children: [
+                    Container(
+                      width: 40, height: 40,
+                      decoration: BoxDecoration(color: const Color(0xFFE65100).withValues(alpha: 0.1), borderRadius: BorderRadius.circular(10)),
+                      child: const Icon(Icons.account_balance_wallet_outlined, size: 20, color: Color(0xFFE65100)),
+                    ),
+                    const SizedBox(width: 14),
+                    Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(_fmtComma(totalCredit), style: GoogleFonts.manrope(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textDark, letterSpacing: -0.5)),
+                      Text('Total Credit Due', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w400, color: AppColors.textMuted)),
+                    ]),
+                  ]),
+                ),
               ),
             ),
           ],

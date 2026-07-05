@@ -11,7 +11,8 @@ import 'login_screen.dart';
 class OtpVerificationScreen extends StatefulWidget {
   final String? email;
   final String? phone;
-  const OtpVerificationScreen({super.key, this.email, this.phone})
+  final String? password;
+  const OtpVerificationScreen({super.key, this.email, this.phone, this.password})
       : assert(email != null || phone != null,
             'Either email or phone must be provided');
 
@@ -82,6 +83,9 @@ class _OtpVerificationScreenState extends State<OtpVerificationScreen> {
         await SupabaseService.verifyPhoneOtp(widget.phone!, code);
       } else {
         await SupabaseService.verifyOtp(widget.email!, code);
+        if (widget.password != null && widget.password!.isNotEmpty) {
+          await SupabaseService.setPasswordAfterOtp(widget.password!);
+        }
       }
       if (!mounted) return;
       Navigator.pushAndRemoveUntil(
