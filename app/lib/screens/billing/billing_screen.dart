@@ -2775,12 +2775,13 @@ class _BillingScreenState extends State<BillingScreen> {
   }
 
   static const _settingsNavItems = [
-    (icon: Icons.storefront_outlined,       label: 'General'),
-    (icon: Icons.percent_rounded,           label: 'Tax'),
-    (icon: Icons.print_outlined,            label: 'Printer'),
-    (icon: Icons.person_outline_rounded,    label: 'Account'),
-    (icon: Icons.shield_outlined,           label: 'Security'),
+    (icon: Icons.storefront_outlined,         label: 'General'),
+    (icon: Icons.percent_rounded,             label: 'Tax'),
+    (icon: Icons.print_outlined,              label: 'Printer'),
+    (icon: Icons.person_outline_rounded,      label: 'Account'),
+    (icon: Icons.shield_outlined,             label: 'Security'),
     (icon: Icons.chat_bubble_outline_rounded, label: 'WhatsApp'),
+    (icon: Icons.delete_sweep_outlined,       label: 'Data'),
   ];
 
   Widget _buildSettingsPanel() {
@@ -2909,6 +2910,7 @@ class _BillingScreenState extends State<BillingScreen> {
             'Account'   => _buildSettingsAccount(),
             'Security'  => _buildSettingsSecurity(),
             'WhatsApp'  => _buildSettingsWhatsApp(),
+            'Data'      => _buildSettingsData(),
             _           => const SizedBox.shrink(),
           },
         ),
@@ -4439,6 +4441,178 @@ class _BillingScreenState extends State<BillingScreen> {
         ),
       ],
     );
+  }
+
+  // ── Data Reset ──
+  Widget _buildSettingsData() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _settingsPageTitle('Data', Icons.delete_sweep_outlined),
+        const SizedBox(height: 8),
+        Padding(
+          padding: const EdgeInsets.only(left: 2, bottom: 24),
+          child: Text(
+            'Permanently delete data from this device and cloud. This cannot be undone.',
+            style: GoogleFonts.inter(fontSize: 12.5, color: const Color(0xFF6E6E73)),
+          ),
+        ),
+        _settingsSectionHeader('RESET OPTIONS'),
+        const SizedBox(height: 12),
+        _resetCard(
+          icon: Icons.people_outline_rounded,
+          title: 'Customer Data',
+          subtitle: 'Delete all customers and credit balances',
+          onTap: () => _confirmReset('Customer Data', _resetCustomers),
+        ),
+        const SizedBox(height: 10),
+        _resetCard(
+          icon: Icons.receipt_long_outlined,
+          title: 'Sales',
+          subtitle: 'Delete all transactions and billing history',
+          onTap: () => _confirmReset('Sales', _resetSales),
+        ),
+        const SizedBox(height: 10),
+        _resetCard(
+          icon: Icons.inventory_2_outlined,
+          title: 'Inventory',
+          subtitle: 'Delete all products and categories',
+          onTap: () => _confirmReset('Inventory', _resetInventory),
+        ),
+        const SizedBox(height: 24),
+        _settingsSectionHeader('DANGER ZONE'),
+        const SizedBox(height: 12),
+        _resetCard(
+          icon: Icons.warning_amber_rounded,
+          title: 'Reset All Data',
+          subtitle: 'Delete everything — customers, sales, and inventory',
+          danger: true,
+          onTap: () => _confirmReset('All Data', _resetAll),
+        ),
+      ],
+    );
+  }
+
+  Widget _resetCard({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+    bool danger = false,
+  }) {
+    final color = danger ? const Color(0xFFFF3B30) : const Color(0xFF1D1D1F);
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: danger ? const Color(0xFFFF3B30).withValues(alpha: 0.3) : const Color(0xFFE5E5EA)),
+        ),
+        child: Row(children: [
+          Container(
+            width: 36, height: 36,
+            decoration: BoxDecoration(
+              color: (danger ? const Color(0xFFFF3B30) : AppColors.primary).withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(9),
+            ),
+            child: Icon(icon, size: 18, color: danger ? const Color(0xFFFF3B30) : AppColors.primary),
+          ),
+          const SizedBox(width: 14),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title, style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w600, color: color)),
+            const SizedBox(height: 2),
+            Text(subtitle, style: GoogleFonts.inter(fontSize: 12, color: const Color(0xFF8E8E93))),
+          ])),
+          Icon(Icons.chevron_right_rounded, size: 18, color: const Color(0xFFBDBDBD)),
+        ]),
+      ),
+    );
+  }
+
+  void _confirmReset(String label, Future<void> Function() action) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('Reset $label?', style: GoogleFonts.manrope(fontSize: 17, fontWeight: FontWeight.w700)),
+        content: Text(
+          'This will permanently delete all $label from this device and cloud. This action cannot be undone.',
+          style: GoogleFonts.inter(fontSize: 13, color: const Color(0xFF6E6E73), height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text('Cancel', style: GoogleFonts.inter(fontWeight: FontWeight.w600, color: AppColors.primary)),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await action();
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text('$label deleted successfully', style: GoogleFonts.inter(color: Colors.white)),
+                backgroundColor: const Color(0xFF34C759),
+                behavior: SnackBarBehavior.floating,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ));
+              _loadDashboardData();
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFFF3B30),
+              foregroundColor: Colors.white,
+              elevation: 0,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            child: Text('Delete', style: GoogleFonts.inter(fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _resetCustomers() async {
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final db = await LocalDbService.db;
+    await db.delete('customers');
+    if (userId != null) {
+      try {
+        await Supabase.instance.client.from('customers').delete().eq('user_id', userId);
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _resetSales() async {
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final db = await LocalDbService.db;
+    await db.delete('transactions');
+    if (userId != null) {
+      try {
+        await Supabase.instance.client.from('transactions').delete().eq('user_id', userId);
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _resetInventory() async {
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final db = await LocalDbService.db;
+    await db.delete('products');
+    await db.delete('categories');
+    if (userId != null) {
+      try {
+        await Supabase.instance.client.from('products').delete().eq('user_id', userId);
+        await Supabase.instance.client.from('categories').delete().eq('user_id', userId);
+      } catch (_) {}
+    }
+    setState(() => _products = List.from(_defaultProducts));
+  }
+
+  Future<void> _resetAll() async {
+    await _resetCustomers();
+    await _resetSales();
+    await _resetInventory();
   }
 
   // ── Settings UI helpers ──
