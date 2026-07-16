@@ -3,7 +3,7 @@ set -e
 
 # ── Config ───────────────────────────────────────────────────────────────────
 SUPABASE_URL="https://xawpxbhglzhaibmcpwho.supabase.co"
-SUPABASE_SERVICE_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhhd3B4YmhnbHpoYWlibWNwd2hvIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NzExMDgxMywiZXhwIjoyMDkyNjg2ODEzfQ.c3tDKWQeoNsThn0hf1Cq-GBnQgNrFhtx0zS9A6RypO8"
+SUPABASE_SERVICE_KEY="${SUPABASE_SERVICE_KEY:?Set SUPABASE_SERVICE_KEY in your environment before running this script}"
 BUCKET="billcat-updates"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"  # set via: export GITHUB_TOKEN=ghp_...
 GITHUB_REPO="billcatapp/billcat"
