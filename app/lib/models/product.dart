@@ -1,4 +1,71 @@
+import 'dart:convert';
+
 const kProductUnits = ['pcs', 'kg', 'g', 'L', 'mL', 'm', 'ft', 'box', 'dozen', 'pair'];
+
+/// A single variant of a product (e.g. Size: M) with its own price, stock and SKU.
+class ProductVariant {
+  final String id;
+  final String name;
+  final double price;
+  final int stock;
+  final String sku;
+  final String barcodeNo;
+
+  const ProductVariant({
+    required this.id,
+    required this.name,
+    required this.price,
+    this.stock = 0,
+    this.sku = '',
+    this.barcodeNo = '',
+  });
+
+  Map<String, dynamic> toMap() => {
+    'id': id,
+    'name': name,
+    'price': price,
+    'stock': stock,
+    'sku': sku,
+    'barcode_no': barcodeNo,
+  };
+
+  static ProductVariant fromMap(Map<String, dynamic> m) => ProductVariant(
+    id: (m['id'] ?? '').toString(),
+    name: (m['name'] ?? '').toString(),
+    price: (m['price'] as num?)?.toDouble() ?? 0.0,
+    stock: (m['stock'] as num?)?.toInt() ?? 0,
+    sku: (m['sku'] ?? '').toString(),
+    barcodeNo: (m['barcode_no'] ?? '').toString(),
+  );
+
+  ProductVariant copyWith({String? name, double? price, int? stock, String? sku, String? barcodeNo}) =>
+      ProductVariant(
+        id: id,
+        name: name ?? this.name,
+        price: price ?? this.price,
+        stock: stock ?? this.stock,
+        sku: sku ?? this.sku,
+        barcodeNo: barcodeNo ?? this.barcodeNo,
+      );
+}
+
+/// Encode/decode a variants list to a JSON string (used for both SQLite and cloud).
+String encodeVariants(List<ProductVariant> variants) =>
+    jsonEncode(variants.map((v) => v.toMap()).toList());
+
+List<ProductVariant> decodeVariants(dynamic raw) {
+  if (raw == null) return const [];
+  try {
+    final list = raw is String ? jsonDecode(raw) : raw;
+    if (list is List) {
+      return list
+          .whereType<Map>()
+          .map((m) => ProductVariant.fromMap(Map<String, dynamic>.from(m)))
+          .toList();
+    }
+  } catch (_) {}
+  return const [];
+}
 
 class Product {
   final String id;
@@ -13,6 +80,7 @@ class Product {
   final String description;
   final String unit;
   final String barcodeNo;
+  final List<ProductVariant> variants;
 
   const Product({
     required this.id,
@@ -27,7 +95,10 @@ class Product {
     this.description = '',
     this.unit = 'pcs',
     this.barcodeNo = '',
+    this.variants = const [],
   });
+
+  bool get hasVariants => variants.isNotEmpty;
 
   Map<String, dynamic> toMap() => {
     'id': id,
@@ -42,6 +113,7 @@ class Product {
     'description': description,
     'unit': unit,
     'barcode_no': barcodeNo,
+    'variants': encodeVariants(variants),
     'synced': 0,
   };
 
@@ -58,22 +130,26 @@ class Product {
     description: (m['description'] as String?) ?? '',
     unit: (m['unit'] as String?) ?? 'pcs',
     barcodeNo: (m['barcode_no'] as String?) ?? '',
+    variants: decodeVariants(m['variants']),
   );
 
-  Product copyWith({int? stock, String? barcodeNo}) => Product(
+  Product copyWith({int? stock, String? barcodeNo, List<ProductVariant>? variants}) => Product(
     id: id, name: name, price: price, buyingPrice: buyingPrice,
     taxPercent: taxPercent, category: category,
     emoji: emoji, sku: sku, stock: stock ?? this.stock,
     description: description, unit: unit,
     barcodeNo: barcodeNo ?? this.barcodeNo,
+    variants: variants ?? this.variants,
   );
 }
 
 class CartItem {
   final Product product;
   int quantity;
+  final ProductVariant? variant;
 
-  CartItem({required this.product, this.quantity = 1});
+  CartItem({required this.product, this.quantity = 1, this.variant});
 
-  double get total => product.price * quantity;
+  double get unitPrice => variant?.price ?? product.price;
+  double get total => unitPrice * quantity;
 }

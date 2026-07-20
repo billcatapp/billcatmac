@@ -83,6 +83,7 @@ class ConnectivityService extends ChangeNotifier {
               'sku': p.sku,
               'stock': p.stock,
               'description': p.description,
+              'variants': encodeVariants(p.variants),
             }).toList(),
           );
           for (final p in unsyncedProducts) {
@@ -237,6 +238,7 @@ class ConnectivityService extends ChangeNotifier {
                 'sku': r['sku'],
                 'stock': r['stock'],
                 'description': (r['description'] as String?) ?? '',
+                'variants': r['variants'],
                 'synced': 1,
               }))
           .toList();

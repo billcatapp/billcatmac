@@ -35,7 +35,7 @@ class LocalDbService {
     final dbPath = await _appSupportPath();
     return openDatabase(
       join(dbPath, 'billcat_$userId.db'),
-      version: 13,
+      version: 14,
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 4) {
           try { await db.execute('ALTER TABLE products ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0'); } catch (_) {}
@@ -82,6 +82,9 @@ class LocalDbService {
         if (oldVersion < 13) {
           try { await db.execute("ALTER TABLE customers ADD COLUMN credit_balance REAL NOT NULL DEFAULT 0"); } catch (_) {}
         }
+        if (oldVersion < 14) {
+          try { await db.execute("ALTER TABLE products ADD COLUMN variants TEXT NOT NULL DEFAULT '[]'"); } catch (_) {}
+        }
       },
       onCreate: (db, _) => _createTables(db),
     );
@@ -102,6 +105,7 @@ class LocalDbService {
         description TEXT NOT NULL DEFAULT '',
         unit TEXT NOT NULL DEFAULT 'pcs',
         barcode_no TEXT NOT NULL DEFAULT '',
+        variants TEXT NOT NULL DEFAULT '[]',
         synced INTEGER NOT NULL DEFAULT 0,
         deleted INTEGER NOT NULL DEFAULT 0
       )

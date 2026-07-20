@@ -92,7 +92,7 @@ class UpdateService {
     // Get total size for progress tracking
     int totalBytes = 0;
     try {
-      final headResult = await Process.run('curl', ['-sI', '-L', url]);
+      final headResult = await Process.run('/usr/bin/curl', ['-sI', '-L', url]);
       final headOutput = headResult.stdout as String;
       final match = RegExp(r'content-length:\s*(\d+)', caseSensitive: false)
           .allMatches(headOutput)
@@ -113,7 +113,7 @@ class UpdateService {
       });
     }
 
-    final dlResult = await Process.run('curl', ['-L', '--silent', '--show-error', '-o', zipPath, url]);
+    final dlResult = await Process.run('/usr/bin/curl', ['-L', '--silent', '--show-error', '-o', zipPath, url]);
     downloadComplete = true;
     pollTimer?.cancel();
 
@@ -125,7 +125,7 @@ class UpdateService {
     onProgress(0.88);
     final extractDir = '${tmpDir.path}/extracted';
     await Directory(extractDir).create();
-    final unzip = await Process.run('unzip', ['-q', zipPath, '-d', extractDir]);
+    final unzip = await Process.run('/usr/bin/unzip', ['-q', zipPath, '-d', extractDir]);
     if (unzip.exitCode != 0) throw UpdateCheckError('Failed to extract update.');
 
     // Find the .app inside extracted dir
@@ -157,6 +157,7 @@ class UpdateService {
 
     await File(scriptPath).writeAsString(
       '#!/bin/bash\n'
+      'export PATH=/usr/bin:/bin:/usr/sbin:/sbin:\$PATH\n'
       'exec >>${_esc(logPath)} 2>&1\n'
       'echo "[\$(date)] updater started, waiting for BillCat to quit..."\n'
       'for i in \$(seq 1 60); do sleep 0.5; pgrep -xq "BillCat" || break; done\n'
@@ -169,11 +170,11 @@ class UpdateService {
       'rm -rf ${_esc(tmpDir.path)}\n'
       'rm -- "\$0"\n',
     );
-    await Process.run('chmod', ['+x', scriptPath]);
+    await Process.run('/bin/chmod', ['+x', scriptPath]);
 
     onProgress(1.0);
     // nohup detaches the script from this process so it survives after exit(0)
-    await Process.run('bash', ['-c', 'nohup bash ${_esc(scriptPath)} >/dev/null 2>&1 &']);
+    await Process.run('/bin/bash', ['-c', 'nohup /bin/bash ${_esc(scriptPath)} >/dev/null 2>&1 &']);
     await Future.delayed(const Duration(milliseconds: 500));
     exit(0);
   }

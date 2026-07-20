@@ -5644,7 +5644,7 @@ class _BillingScreenState extends State<BillingScreen> {
         args.add(pdfFile.path);
         result = await Process.run('/usr/bin/lpr', args);
       } else {
-        result = await Process.run('osascript', ['-e',
+        result = await Process.run('/usr/bin/osascript',['-e',
   'tell application "Preview" to activate\n'
   'tell application "Preview" to open POSIX file "${pdfFile.path}"\n'
   'delay 1\n'
@@ -6082,10 +6082,10 @@ tell application "Google Chrome"
   activate
 end tell
 ''';
-      final result = await Process.run('osascript', ['-e', appleScript]);
+      final result = await Process.run('/usr/bin/osascript',['-e', appleScript]);
       if (result.exitCode != 0) {
         // Fallback if Chrome isn't running
-        await Process.run('open', [url]);
+        await Process.run('/usr/bin/open', [url]);
       }
 
       if (mounted) _showToast('Opening WhatsApp Web...');
@@ -6312,6 +6312,36 @@ end tell
 
   // ── Bulk Barcode Print View ──────────────────────────────────────────────────
 
+  // Live printer connection status. macOS: parse `lpstat -l -p` and look for the
+  // `offline-report` alert CUPS raises when a USB/network printer is unreachable.
+  // Returns a map keyed by printer display name → true (online) / false (offline).
+  Future<Map<String, bool>> _fetchPrinterOnlineMap() async {
+    final map = <String, bool>{};
+    if (!Platform.isMacOS) return map;
+    try {
+      final res = await Process.run('/usr/bin/lpstat',['-l', '-p'])
+          .timeout(const Duration(seconds: 3));
+      final lines = '${res.stdout}'.split('\n');
+      String? current;
+      bool offline = false;
+      void commit() {
+        if (current != null) map[current!.replaceAll('_', ' ')] = !offline;
+      }
+      for (final line in lines) {
+        final m = RegExp(r'^printer (\S+) is').firstMatch(line);
+        if (m != null) {
+          commit();
+          current = m.group(1);
+          offline = line.contains('disabled');
+        } else if (line.trimLeft().toLowerCase().startsWith('alerts:')) {
+          if (line.toLowerCase().contains('offline')) offline = true;
+        }
+      }
+      commit();
+    } catch (_) {}
+    return map;
+  }
+
   void _showBulkPrintDialog() {
     final labelWCtrl  = TextEditingController(text: _barcodeLabelW.toStringAsFixed(_barcodeLabelW == _barcodeLabelW.truncateToDouble() ? 0 : 1));
     final labelHCtrl  = TextEditingController(text: _barcodeLabelH.toStringAsFixed(_barcodeLabelH == _barcodeLabelH.truncateToDouble() ? 0 : 1));
@@ -6320,8 +6350,11 @@ end tell
     final qtys        = Map<String, int>.from(_bulkPrintQtys);
     final selected    = Map<String, bool>.from(_bulkPrintSelected);
     var printers      = <String>['System Default'];
+    var printerObjects = <Printer>[];
+    var printerOnline = <String, bool>{};
     String printer    = _barcodePrinter;
     String searchQ    = '';
+    Timer? statusTimer;
 
     // Per-product qty TextEditingControllers
     final qtyCtrlMap = <String, TextEditingController>{
@@ -6331,15 +6364,26 @@ end tell
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setLocal) {
-        if (printers.length <= 1) {
-          Printing.listPrinters().then((list) {
+        void refreshPrinters() {
+          Printing.listPrinters().then((list) async {
             final names = <String>['System Default', ...list.map((p) => p.name)];
+            final online = await _fetchPrinterOnlineMap();
             if (ctx.mounted) setLocal(() {
               printers = names;
+              printerObjects = list;
+              printerOnline = online;
               if (names.contains(_barcodePrinter)) printer = _barcodePrinter;
             });
           });
         }
+        if (printers.length <= 1) refreshPrinters();
+        statusTimer ??= Timer.periodic(const Duration(seconds: 4), (_) {
+          if (ctx.mounted) {
+            refreshPrinters();
+          } else {
+            statusTimer?.cancel();
+          }
+        });
         final filteredProducts = searchQ.isEmpty
           ? _products
           : _products.where((p) {
@@ -6392,8 +6436,26 @@ end tell
                     value: printers.contains(printer) ? printer : 'System Default',
                     isDense: true, isExpanded: true,
                     icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 14, color: AppColors.textMuted),
-                    items: printers.map((n) => DropdownMenuItem(value: n,
-                      child: Text(n, style: GoogleFonts.inter(fontSize: 12, color: AppColors.textDark), overflow: TextOverflow.ellipsis))).toList(),
+                    items: printers.map((n) {
+                      Color dotColor;
+                      if (n == 'System Default') {
+                        dotColor = const Color(0xFF8E8E93);
+                      } else {
+                        final online = printerOnline[n];
+                        dotColor = online == null
+                            ? const Color(0xFF8E8E93)          // unknown
+                            : online
+                                ? const Color(0xFF34C759)      // online
+                                : const Color(0xFFFF3B30);     // offline
+                      }
+                      return DropdownMenuItem(value: n,
+                        child: Row(children: [
+                          Container(width: 7, height: 7,
+                            decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle)),
+                          const SizedBox(width: 6),
+                          Expanded(child: Text(n, style: GoogleFonts.inter(fontSize: 12, color: AppColors.textDark), overflow: TextOverflow.ellipsis)),
+                        ]));
+                    }).toList(),
                     onChanged: (v) => setLocal(() => printer = v ?? 'System Default'),
                     style: GoogleFonts.inter(fontSize: 12, color: AppColors.textDark),
                   ))),
@@ -6554,11 +6616,24 @@ end tell
               ),
               const SizedBox(height: 4),
               // ── Footer ──
-              Padding(
+              Builder(builder: (_) {
+              final isDefault = printer == 'System Default';
+              final isOffline = printerOnline[printer] == false;
+              // Only print to a specific, connected printer. System Default and
+              // offline printers must never receive the job.
+              final canPrint = total > 0 && !isDefault && !isOffline;
+              return Padding(
                 padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
                 child: Row(children: [
-                  Text('$total label${total != 1 ? 's' : ''} to print',
-                      style: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted)),
+                  Flexible(child: Text(
+                      isDefault
+                          ? 'Select a connected printer to print'
+                          : isOffline
+                              ? '$printer is offline — connect it to print'
+                              : '$total label${total != 1 ? 's' : ''} to print',
+                      style: GoogleFonts.inter(fontSize: 12,
+                          color: (isDefault || isOffline) ? const Color(0xFFFF3B30) : AppColors.textMuted),
+                      overflow: TextOverflow.ellipsis)),
                   const Spacer(),
                   OutlinedButton(
                     onPressed: () => Navigator.pop(ctx),
@@ -6572,7 +6647,7 @@ end tell
                   ),
                   const SizedBox(width: 10),
                   ElevatedButton.icon(
-                    onPressed: total == 0 ? null : () async {
+                    onPressed: !canPrint ? null : () async {
                       final w = double.tryParse(labelWCtrl.text) ?? _barcodeLabelW;
                       final h = double.tryParse(labelHCtrl.text) ?? _barcodeLabelH;
                       final perRow = int.tryParse(perRowCtrl.text) ?? _barcodePerRow;
@@ -6592,12 +6667,13 @@ end tell
                     ),
                   ),
                 ]),
-              ),
+              );
+              }),
             ]),
           ),
         );
       }),
-    );
+    ).then((_) => statusTimer?.cancel());
   }
 
   Widget _miniNumField(TextEditingController ctrl, String suffix, double width) => Container(
@@ -6736,13 +6812,18 @@ end tell
                 const SizedBox(width: 10),
                 Expanded(child: ElevatedButton.icon(
                   onPressed: () async {
+                    final targetPrinter = (printerName != null && printerName != 'System Default') ? printerName : null;
+                    // Never fall back to the OS default printer — require a specific printer.
+                    if (targetPrinter == null) {
+                      _showToast('Select a connected printer — default printing is disabled.', isError: true);
+                      return;
+                    }
                     Navigator.pop(ctx);
                     final tmp = await Directory.systemTemp.createTemp('billcat_bulk_');
                     final pdfFile = File('${tmp.path}/Barcodes.pdf');
                     await pdfFile.writeAsBytes(bytes);
                     final sheetW = marginMm * 2 + labelsPerRow * labelW + (labelsPerRow - 1) * gapMm;
                     final sheetH = labelH;
-                    final targetPrinter = (printerName != null && printerName != 'System Default') ? printerName : null;
                     final wPt = (sheetW / 25.4 * 72).round();
                     final hPt = (sheetH / 25.4 * 72).round();
                     final lprArgs = [
@@ -6752,7 +6833,7 @@ end tell
                       '-o', 'scaling=100',
                       pdfFile.path,
                     ];
-                    final result = await Process.run('lpr', lprArgs);
+                    final result = await Process.run('/usr/bin/lpr',lprArgs);
                     if (result.exitCode != 0 && mounted) {
                       _showToast('Print failed: ${result.stderr}', isError: true);
                     } else if (mounted) {
@@ -7580,7 +7661,7 @@ end tell
                       '-o', 'scaling=100',
                       pdfFile.path,
                     ];
-                    final result2 = await Process.run('lpr', lprArgs2);
+                    final result2 = await Process.run('/usr/bin/lpr',lprArgs2);
                     if (result2.exitCode != 0 && mounted) {
                       _showToast('Print failed: ${result2.stderr}', isError: true);
                     } else if (mounted) {
@@ -7614,8 +7695,8 @@ end tell
     // Clean up wrong entry from previous attempt, then write correct format
     // macOS custom papers use: id, name, width, height, top/bottom/left/right, custom, printer
     // Must use `defaults write` so cfprefsd picks it up immediately (PlistBuddy bypasses cache)
-    await Process.run('defaults', ['delete', 'com.apple.print.custompapers', '0']);
-    await Process.run('defaults', ['write', 'com.apple.print.custompapers', key,
+    await Process.run('/usr/bin/defaults',['delete', 'com.apple.print.custompapers', '0']);
+    await Process.run('/usr/bin/defaults',['write', 'com.apple.print.custompapers', key,
       '{custom = 1; id = "$key"; name = "$displayName"; width = $wPt; height = $hPt; top = 0; bottom = 0; left = 0; right = 0; printer = "";}']);
   }
 
@@ -7684,7 +7765,7 @@ end tell
     final sheetH3 = _barcodeLabelH;
     final wPt3 = (sheetW3 / 25.4 * 72).round();
     final hPt3 = (sheetH3 / 25.4 * 72).round();
-    final result3 = await Process.run('lpr', [
+    final result3 = await Process.run('/usr/bin/lpr',[
       if (targetPrinter3 != null) ...[ '-P', targetPrinter3],
       '-o', 'fit-to-page=false',
       '-o', 'media=Custom.${wPt3}x$hPt3',
@@ -7728,6 +7809,131 @@ end tell
     );
   }
 
+  // ── Variants editor (shared by Add + Edit product dialogs) ────────────────
+  /// Variant selector "box": a row of pills (Default + each variant + Add).
+  /// Selecting a variant makes the main Price/Stock/SKU fields edit that variant.
+  Widget _variantSelector({
+    required List<_VariantDraft> drafts,
+    required int selVar,
+    required void Function(int) onSelect,
+    required StateSetter setLocal,
+  }) {
+    Widget pill({required String label, required bool selected, required VoidCallback onTap, Widget? trailing}) {
+      return GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          decoration: BoxDecoration(
+            color: selected ? AppColors.primary : Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: selected ? AppColors.primary : AppColors.border),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Text(label, style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600,
+                color: selected ? Colors.white : AppColors.textDark)),
+            if (trailing != null) ...[const SizedBox(width: 6), trailing],
+          ]),
+        ),
+      );
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceVariant,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          _dlgLabel('VARIANTS'),
+          const SizedBox(width: 6),
+          Expanded(child: Text('pick one to edit its price & stock in the fields below',
+              style: GoogleFonts.inter(fontSize: 10, color: AppColors.textMuted), overflow: TextOverflow.ellipsis)),
+        ]),
+        const SizedBox(height: 8),
+        Wrap(spacing: 6, runSpacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
+          pill(label: 'Default', selected: selVar == -1, onTap: () => onSelect(-1)),
+          ...List.generate(drafts.length, (i) {
+            final d = drafts[i];
+            final selected = selVar == i;
+            final nm = d.name.text.trim().isEmpty ? 'Variant ${i + 1}' : d.name.text.trim();
+            return pill(
+              label: nm,
+              selected: selected,
+              onTap: () => onSelect(i),
+              trailing: GestureDetector(
+                onTap: () => setLocal(() {
+                  drafts.removeAt(i);
+                  if (selVar == i) {
+                    onSelect(-1);
+                  } else if (selVar > i) {
+                    onSelect(selVar - 1);
+                  }
+                }),
+                child: Icon(Icons.close_rounded, size: 13, color: selected ? Colors.white : AppColors.textMuted),
+              ),
+            );
+          }),
+          GestureDetector(
+            onTap: () => setLocal(() {
+              drafts.add(_VariantDraft());
+              onSelect(drafts.length - 1);
+            }),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: AppColors.primary.withValues(alpha: 0.5)),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.add_rounded, size: 14, color: AppColors.primary),
+                const SizedBox(width: 4),
+                Text('Add variant', style: GoogleFonts.inter(fontSize: 12, color: AppColors.primary, fontWeight: FontWeight.w600)),
+              ]),
+            ),
+          ),
+        ]),
+        if (selVar >= 0 && selVar < drafts.length) ...[
+          const SizedBox(height: 10),
+          Text('VARIANT NAME', style: _variantHeaderStyle()),
+          const SizedBox(height: 4),
+          TextField(
+            controller: drafts[selVar].name,
+            onChanged: (_) => setLocal(() {}),
+            style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
+            decoration: _dlgInputDecor('e.g. Small / Red'),
+          ),
+        ],
+      ]),
+    );
+  }
+
+  TextStyle _variantHeaderStyle() => GoogleFonts.inter(
+      fontSize: 9.5, fontWeight: FontWeight.w600, color: AppColors.textMuted, letterSpacing: 0.5);
+
+  /// Convert drafts → variants, deriving SKU/barcode from the parent when blank.
+  List<ProductVariant> _buildVariantsFromDrafts(
+      List<_VariantDraft> drafts, String parentSku, double parentPrice) {
+    final out = <ProductVariant>[];
+    for (final d in drafts) {
+      final vname = d.name.text.trim();
+      if (vname.isEmpty) continue;
+      final vsku = d.sku.text.trim();
+      out.add(ProductVariant(
+        id: d.id.isNotEmpty ? d.id : 'v${DateTime.now().microsecondsSinceEpoch}${out.length}',
+        name: vname,
+        price: double.tryParse(d.price.text) ?? parentPrice,
+        stock: int.tryParse(d.stock.text) ?? 0,
+        sku: vsku.isNotEmpty ? vsku : (parentSku.isNotEmpty ? '$parentSku-$vname' : vname),
+        barcodeNo: d.barcodeNo,
+      ));
+    }
+    return out;
+  }
+
   void _showEditProductDialog(Product p) {
     final formKey = GlobalKey<FormState>();
     final nameCtrl = TextEditingController(text: p.name);
@@ -7746,10 +7952,16 @@ end tell
     String category = _userCategories.contains(p.category) ? p.category : (_userCategories..add(p.category)).last;
     String unit = kProductUnits.contains(p.unit) ? p.unit : 'pcs';
     final barcodeNoCtrl = TextEditingController(text: p.barcodeNo);
+    final variantDrafts = p.variants.map(_VariantDraft.fromVariant).toList();
+    int selVar = -1; // -1 = base product; else index into variantDrafts
 
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setLocal) {
+        final activeVar = (selVar >= 0 && selVar < variantDrafts.length) ? variantDrafts[selVar] : null;
+        final priceController = activeVar?.price ?? priceCtrl;
+        final stockController = activeVar?.stock ?? stockCtrl;
+        final skuController = activeVar?.sku ?? skuCtrl;
         return Dialog(
           backgroundColor: Colors.white,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -7836,11 +8048,13 @@ end tell
                         ])),
                       ]),
                       const SizedBox(height: 16),
+                      _variantSelector(drafts: variantDrafts, selVar: selVar, onSelect: (v) => setLocal(() => selVar = v), setLocal: setLocal),
+                      const SizedBox(height: 16),
                       Row(children: [
                         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                           _dlgLabel('SKU'),
                           const SizedBox(height: 6),
-                          TextFormField(controller: skuCtrl,
+                          TextFormField(controller: skuController,
                               style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
                               decoration: _dlgInputDecor('e.g. WK-00123')),
                         ])),
@@ -7883,28 +8097,29 @@ end tell
                       const SizedBox(height: 16),
                       Row(children: [
                         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          _dlgLabel('SELLING PRICE ($_currencySymbol)'),
+                          _dlgLabel(activeVar != null ? 'VARIANT PRICE ($_currencySymbol)' : 'SELLING PRICE ($_currencySymbol)'),
                           const SizedBox(height: 6),
                           TextFormField(
-                            controller: priceCtrl,
+                            controller: priceController,
                             keyboardType: const TextInputType.numberWithOptions(decimal: true),
                             inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
-                            validator: (v) => v != null && v.isNotEmpty && double.tryParse(v) != null ? null : 'Required',
+                            validator: (v) => activeVar != null || (v != null && v.isNotEmpty && double.tryParse(v) != null) ? null : 'Required',
                             style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
                             decoration: _dlgInputDecor('0.00'),
                           ),
                         ])),
                         const SizedBox(width: 14),
                         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          _dlgLabel('STOCK QTY'),
+                          _dlgLabel(activeVar != null ? 'VARIANT STOCK' : 'STOCK QTY'),
                           const SizedBox(height: 6),
                           TextFormField(
-                            controller: stockCtrl,
+                            controller: stockController,
+                            enabled: activeVar != null || variantDrafts.isEmpty,
                             keyboardType: TextInputType.number,
                             inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                            validator: (v) => v != null && v.isNotEmpty ? null : 'Required',
+                            validator: (v) => activeVar != null || variantDrafts.isNotEmpty || (v != null && v.isNotEmpty) ? null : 'Required',
                             style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
-                            decoration: _dlgInputDecor('0'),
+                            decoration: _dlgInputDecor(activeVar == null && variantDrafts.isNotEmpty ? 'Auto (sum of variants)' : '0'),
                           ),
                         ])),
                         const SizedBox(width: 14),
@@ -8043,19 +8258,27 @@ end tell
                         final newBarcodeNo = barcodeNoCtrl.text.trim().isNotEmpty
                           ? barcodeNoCtrl.text.trim()
                           : await LocalDbService.getNextBarcodeNo();
+                        final basePrice = double.tryParse(priceCtrl.text) ?? 0;
+                        final baseSku = skuCtrl.text.trim().isEmpty ? p.sku : skuCtrl.text.trim();
+                        final variants = _buildVariantsFromDrafts(variantDrafts, baseSku, basePrice);
+                        // With variants, total stock is the sum of variant stocks.
+                        final effectiveStock = variants.isNotEmpty
+                            ? variants.fold<int>(0, (s, v) => s + v.stock)
+                            : (int.tryParse(stockCtrl.text) ?? 0);
                         final updated = Product(
                           id: p.id,
                           name: nameCtrl.text.trim(),
-                          price: double.parse(priceCtrl.text),
+                          price: basePrice,
                           buyingPrice: double.tryParse(buyingPriceCtrl.text) ?? 0.0,
                           taxPercent: double.tryParse(taxPercentCtrl.text) ?? 0.0,
                           category: category,
                           emoji: emoji,
-                          sku: skuCtrl.text.trim().isEmpty ? p.sku : skuCtrl.text.trim(),
-                          stock: int.parse(stockCtrl.text),
+                          sku: baseSku,
+                          stock: effectiveStock,
                           description: tags.join(', '),
                           unit: unit,
                           barcodeNo: newBarcodeNo,
+                          variants: variants,
                         );
                         await LocalDbService.updateProduct(updated);
                         ConnectivityService.instance.syncNow();
@@ -8126,6 +8349,8 @@ end tell
     String unit = 'pcs';
     String barcodeNo = '';
     bool skuAutoMode = true;
+    final variantDrafts = <_VariantDraft>[];
+    int selVar = -1; // -1 = base product; else index into variantDrafts
     LocalDbService.getNextBarcodeNo().then((n) { barcodeNo = n; });
 
     nameCtrl.addListener(() {
@@ -8142,6 +8367,10 @@ end tell
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setLocal) {
+        final activeVar = (selVar >= 0 && selVar < variantDrafts.length) ? variantDrafts[selVar] : null;
+        final priceController = activeVar?.price ?? priceCtrl;
+        final stockController = activeVar?.stock ?? stockCtrl;
+        final skuController = activeVar?.sku ?? skuCtrl;
         return Dialog(
           backgroundColor: Colors.white,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -8267,6 +8496,8 @@ end tell
                           ],
                         ),
                         const SizedBox(height: 16),
+                        _variantSelector(drafts: variantDrafts, selVar: selVar, onSelect: (v) => setLocal(() => selVar = v), setLocal: setLocal),
+                        const SizedBox(height: 16),
                         // SKU + Category row
                         Row(
                           children: [
@@ -8278,7 +8509,7 @@ end tell
                                   _dlgLabel('SKU'),
                                   const SizedBox(height: 6),
                                   TextFormField(
-                                    controller: skuCtrl,
+                                    controller: skuController,
                                     style: GoogleFonts.inter(
                                         fontSize: 13,
                                         color: AppColors.textDark),
@@ -8346,13 +8577,14 @@ end tell
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  _dlgLabel('SELLING PRICE ($_currencySymbol)'),
+                                  _dlgLabel(activeVar != null ? 'VARIANT PRICE ($_currencySymbol)' : 'SELLING PRICE ($_currencySymbol)'),
                                   const SizedBox(height: 6),
                                   TextFormField(
-                                    controller: priceCtrl,
+                                    controller: priceController,
                                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                                     inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
                                     validator: (v) {
+                                      if (activeVar != null) return null;
                                       if (v == null || v.isEmpty) return 'Required';
                                       if (double.tryParse(v) == null) return 'Invalid number';
                                       return null;
@@ -8368,15 +8600,16 @@ end tell
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  _dlgLabel('STOCK QTY'),
+                                  _dlgLabel(activeVar != null ? 'VARIANT STOCK' : 'STOCK QTY'),
                                   const SizedBox(height: 6),
                                   TextFormField(
-                                    controller: stockCtrl,
+                                    controller: stockController,
+                                    enabled: activeVar != null || variantDrafts.isEmpty,
                                     keyboardType: TextInputType.number,
                                     inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                                    validator: (v) => v != null && v.isNotEmpty ? null : 'Required',
+                                    validator: (v) => activeVar != null || variantDrafts.isNotEmpty || (v != null && v.isNotEmpty) ? null : 'Required',
                                     style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
-                                    decoration: _dlgInputDecor('0'),
+                                    decoration: _dlgInputDecor(activeVar == null && variantDrafts.isNotEmpty ? 'Auto (sum of variants)' : '0'),
                                   ),
                                 ],
                               ),
@@ -8546,23 +8779,29 @@ end tell
                             _showToast('SKU "$sku" already exists', isError: true);
                             return;
                           }
+                          final basePrice = double.tryParse(priceCtrl.text) ?? 0;
+                          final variants = _buildVariantsFromDrafts(variantDrafts, sku, basePrice);
+                          final effectiveStock = variants.isNotEmpty
+                              ? variants.fold<int>(0, (s, v) => s + v.stock)
+                              : (int.tryParse(stockCtrl.text) ?? 0);
                           final newProduct = Product(
                             id: DateTime.now()
                                 .millisecondsSinceEpoch
                                 .toString(),
                             name: nameCtrl.text.trim(),
-                            price: double.parse(priceCtrl.text),
+                            price: basePrice,
                             buyingPrice: double.tryParse(buyingPriceCtrl.text) ?? 0.0,
                             taxPercent: double.tryParse(taxPercentCtrl.text) ?? 0.0,
                             category: category,
                             emoji: emoji,
                             sku: sku,
-                            stock: int.parse(stockCtrl.text),
+                            stock: effectiveStock,
                             description: tags.join(', '),
                             unit: unit,
                             barcodeNo: barcodeNo.isEmpty
                               ? await LocalDbService.getNextBarcodeNo()
                               : barcodeNo,
+                            variants: variants,
                           );
                           await LocalDbService.insertProduct(newProduct);
                           ConnectivityService.instance.syncNow();
@@ -10092,6 +10331,7 @@ end tell
       return;
     }
     final enteredDigits = ValueNotifier<String>('');
+    final keyboardFocus = FocusNode();
     showDialog(
       context: context,
       barrierDismissible: true,
@@ -10111,15 +10351,16 @@ end tell
               }
             });
           }
-          return _buildPasscodeDialog('Owner Access', 'Enter 4-digit passcode', enteredDigits, ctx);
+          return _buildPasscodeDialog('Owner Access', 'Enter 4-digit passcode', enteredDigits, ctx, keyboardFocus);
         },
       ),
-    );
+    ).then((_) => keyboardFocus.dispose());
   }
 
   void _showSetPasscodeDialog({bool isFirstTime = false, VoidCallback? onSet}) {
     final firstDigits  = ValueNotifier<String>('');
     final secondDigits = ValueNotifier<String>('');
+    final keyboardFocus = FocusNode();
     bool confirming = false;
     showDialog(
       context: context,
@@ -10156,13 +10397,13 @@ end tell
               return _buildPasscodeDialog(
                 confirming ? 'Confirm Passcode' : 'Set Owner Passcode',
                 confirming ? 'Re-enter the same 4 digits' : 'Choose a 4-digit owner passcode',
-                current, ctx,
+                current, ctx, keyboardFocus,
               );
             },
           );
         },
       ),
-    );
+    ).then((_) => keyboardFocus.dispose());
   }
 
   Future<void> _saveNewPasscode(String code) async {
@@ -10171,8 +10412,27 @@ end tell
     ConnectivityService.instance.syncNow();
   }
 
-  Widget _buildPasscodeDialog(String title, String subtitle, ValueNotifier<String> digits, BuildContext ctx) {
-    return Dialog(
+  Widget _buildPasscodeDialog(String title, String subtitle, ValueNotifier<String> digits, BuildContext ctx, FocusNode keyboardFocus) {
+    return KeyboardListener(
+      focusNode: keyboardFocus,
+      autofocus: true,
+      onKeyEvent: (event) {
+        if (event is! KeyDownEvent) return;
+        final key = event.logicalKey;
+        if (key == LogicalKeyboardKey.backspace || key == LogicalKeyboardKey.delete) {
+          if (digits.value.isNotEmpty) {
+            digits.value = digits.value.substring(0, digits.value.length - 1);
+          }
+        } else if (key == LogicalKeyboardKey.escape) {
+          Navigator.pop(ctx);
+        } else {
+          final ch = event.character;
+          if (ch != null && ch.length == 1 && '0123456789'.contains(ch) && digits.value.length < 4) {
+            digits.value = digits.value + ch;
+          }
+        }
+      },
+      child: Dialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       backgroundColor: Colors.white,
       child: SizedBox(
@@ -10211,48 +10471,17 @@ end tell
                   );
                 }),
               ),
-              const SizedBox(height: 28),
-              // Number pad
-              ...[
-                ['1','2','3'],
-                ['4','5','6'],
-                ['7','8','9'],
-                ['','0','⌫'],
-              ].map((row) => Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: row.map((key) {
-                    if (key.isEmpty) return const SizedBox(width: 72);
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      child: GestureDetector(
-                        onTap: () {
-                          if (key == '⌫') {
-                            if (digits.value.isNotEmpty) {
-                              digits.value = digits.value.substring(0, digits.value.length - 1);
-                            }
-                          } else if (digits.value.length < 4) {
-                            digits.value = digits.value + key;
-                          }
-                        },
-                        child: Container(
-                          width: 64, height: 56,
-                          decoration: BoxDecoration(
-                            color: key == '⌫' ? Colors.transparent : const Color(0xFFF5F5F7),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          alignment: Alignment.center,
-                          child: key == '⌫'
-                              ? const Icon(Icons.backspace_outlined, size: 20, color: Color(0xFF6E6E73))
-                              : Text(key, style: GoogleFonts.manrope(fontSize: 22, fontWeight: FontWeight.w600, color: AppColors.textDark)),
-                        ),
-                      ),
-                    );
-                  }).toList(),
-                ),
-              )),
-              const SizedBox(height: 8),
+              const SizedBox(height: 24),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.keyboard_outlined, size: 15, color: AppColors.textMuted),
+                  const SizedBox(width: 6),
+                  Text('Type your passcode',
+                      style: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted)),
+                ],
+              ),
+              const SizedBox(height: 20),
               TextButton(
                 onPressed: () => Navigator.pop(ctx),
                 child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted)),
@@ -10260,6 +10489,7 @@ end tell
             ],
           ),
         ),
+      ),
       ),
     );
   }
@@ -11631,4 +11861,35 @@ class _BarcodePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_BarcodePainter old) => old.data != data;
+}
+
+/// Editable draft of a product variant, backing the variants editor UI.
+class _VariantDraft {
+  final String id;
+  final TextEditingController name;
+  final TextEditingController price;
+  final TextEditingController stock;
+  final TextEditingController sku;
+  final String barcodeNo;
+
+  _VariantDraft({
+    this.id = '',
+    String name = '',
+    String price = '',
+    String stock = '',
+    String sku = '',
+    this.barcodeNo = '',
+  })  : name = TextEditingController(text: name),
+        price = TextEditingController(text: price),
+        stock = TextEditingController(text: stock),
+        sku = TextEditingController(text: sku);
+
+  static _VariantDraft fromVariant(ProductVariant v) => _VariantDraft(
+        id: v.id,
+        name: v.name,
+        price: v.price > 0 ? v.price.toStringAsFixed(2) : '',
+        stock: '${v.stock}',
+        sku: v.sku,
+        barcodeNo: v.barcodeNo,
+      );
 }
