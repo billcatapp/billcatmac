@@ -13,6 +13,7 @@ import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../constants/app_colors.dart';
 import '../../models/customer.dart';
+import '../../models/dealer.dart';
 import '../../models/product.dart';
 import '../../models/transaction_record.dart';
 import '../../providers/cart_provider.dart';
@@ -156,6 +157,9 @@ class _BillingScreenState extends State<BillingScreen> {
   String _salesSearchQuery = '';
   String _customerSearchQuery = '';
   bool _showCreditOnly = false;
+  String _dealerSearchQuery = '';
+  bool _showPayableOnly = false;
+  List<Dealer> _reportDealers = [];
   List<Customer> _reportCustomers = [];
   List<Customer> _savedCustomers = [];
   List<Customer> _nameAcOptions = [];
@@ -1076,9 +1080,10 @@ class _BillingScreenState extends State<BillingScreen> {
           _reportView = value;
         });
         if (value == 'Customers') _loadReportCustomers();
+        if (value == 'Dealers') _loadReportDealers();
       },
       itemBuilder: (_) => [
-        'Sales', 'Customers', 'Inventory',
+        'Sales', 'Customers', 'Dealers', 'Inventory',
       ].map((v) => PopupMenuItem<String>(
         value: v,
         height: 40,
@@ -1088,6 +1093,7 @@ class _BillingScreenState extends State<BillingScreen> {
               switch (v) {
                 'Sales'     => Icons.bar_chart_rounded,
                 'Customers' => Icons.people_alt_outlined,
+                'Dealers'   => Icons.local_shipping_outlined,
                 _           => Icons.inventory_2_outlined,
               },
               size: 16,
@@ -7810,109 +7816,178 @@ end tell
   }
 
   // ── Variants editor (shared by Add + Edit product dialogs) ────────────────
-  /// Variant selector "box": a row of pills (Default + each variant + Add).
-  /// Selecting a variant makes the main Price/Stock/SKU fields edit that variant.
-  Widget _variantSelector({
+
+  /// Compact variant dropdown shown next to the Product Name field.
+  /// Value -1 = Default (base product); 0..n select a variant; -2 = add new.
+  Widget _variantDropdown({
     required List<_VariantDraft> drafts,
     required int selVar,
     required void Function(int) onSelect,
     required StateSetter setLocal,
   }) {
-    Widget pill({required String label, required bool selected, required VoidCallback onTap, Widget? trailing}) {
-      return GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-          decoration: BoxDecoration(
-            color: selected ? AppColors.primary : Colors.white,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: selected ? AppColors.primary : AppColors.border),
-          ),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            Text(label, style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600,
-                color: selected ? Colors.white : AppColors.textDark)),
-            if (trailing != null) ...[const SizedBox(width: 6), trailing],
-          ]),
-        ),
-      );
-    }
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: AppColors.surfaceVariant,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          _dlgLabel('VARIANTS'),
+    return DropdownButtonFormField<int>(
+      value: selVar.clamp(-1, drafts.length - 1),
+      isExpanded: true,
+      isDense: true,
+      icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 18, color: AppColors.textMuted),
+      items: [
+        DropdownMenuItem(value: -1, child: Text('Default', style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark))),
+        ...List.generate(drafts.length, (i) {
+          final nm = drafts[i].name.text.trim().isEmpty ? 'Variant ${i + 1}' : drafts[i].name.text.trim();
+          return DropdownMenuItem(value: i, child: Text(nm, overflow: TextOverflow.ellipsis, style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark)));
+        }),
+        DropdownMenuItem(value: -2, child: Row(mainAxisSize: MainAxisSize.min, children: [
+          const Icon(Icons.add_rounded, size: 14, color: AppColors.accentBlue),
           const SizedBox(width: 6),
-          Expanded(child: Text('pick one to edit its price & stock in the fields below',
-              style: GoogleFonts.inter(fontSize: 10, color: AppColors.textMuted), overflow: TextOverflow.ellipsis)),
-        ]),
-        const SizedBox(height: 8),
-        Wrap(spacing: 6, runSpacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
-          pill(label: 'Default', selected: selVar == -1, onTap: () => onSelect(-1)),
-          ...List.generate(drafts.length, (i) {
-            final d = drafts[i];
-            final selected = selVar == i;
-            final nm = d.name.text.trim().isEmpty ? 'Variant ${i + 1}' : d.name.text.trim();
-            return pill(
-              label: nm,
-              selected: selected,
-              onTap: () => onSelect(i),
-              trailing: GestureDetector(
-                onTap: () => setLocal(() {
-                  drafts.removeAt(i);
-                  if (selVar == i) {
-                    onSelect(-1);
-                  } else if (selVar > i) {
-                    onSelect(selVar - 1);
-                  }
-                }),
-                child: Icon(Icons.close_rounded, size: 13, color: selected ? Colors.white : AppColors.textMuted),
-              ),
-            );
+          Text('Add variant', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.accentBlue)),
+        ])),
+      ],
+      onChanged: (v) {
+        if (v == null) return;
+        if (v == -2) {
+          setLocal(() {
+            drafts.add(_VariantDraft());
+            onSelect(drafts.length - 1);
+          });
+        } else {
+          onSelect(v);
+        }
+      },
+      decoration: _dlgInputDecor('Default'),
+      style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
+      dropdownColor: Colors.white,
+    );
+  }
+
+  /// The "Price & stock below apply to this variant · Rename · Remove" line.
+  Widget _variantEditNote({
+    required List<_VariantDraft> drafts,
+    required int selVar,
+    required void Function(int) onSelect,
+    required StateSetter setLocal,
+  }) {
+    if (selVar < 0 || selVar >= drafts.length) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(children: [
+        Expanded(child: Text('Price & stock below apply to this variant',
+            style: GoogleFonts.inter(fontSize: 11, color: AppColors.textMuted))),
+        GestureDetector(
+          onTap: () => _promptRenameVariant(drafts[selVar], setLocal),
+          child: Text('Rename', style: GoogleFonts.inter(fontSize: 11.5, fontWeight: FontWeight.w600, color: AppColors.accentBlue)),
+        ),
+        const SizedBox(width: 14),
+        GestureDetector(
+          onTap: () => setLocal(() {
+            drafts.removeAt(selVar);
+            onSelect(-1);
           }),
-          GestureDetector(
-            onTap: () => setLocal(() {
-              drafts.add(_VariantDraft());
-              onSelect(drafts.length - 1);
-            }),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: AppColors.primary.withValues(alpha: 0.5)),
-              ),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                const Icon(Icons.add_rounded, size: 14, color: AppColors.primary),
-                const SizedBox(width: 4),
-                Text('Add variant', style: GoogleFonts.inter(fontSize: 12, color: AppColors.primary, fontWeight: FontWeight.w600)),
-              ]),
-            ),
-          ),
-        ]),
-        if (selVar >= 0 && selVar < drafts.length) ...[
-          const SizedBox(height: 10),
-          Text('VARIANT NAME', style: _variantHeaderStyle()),
-          const SizedBox(height: 4),
-          TextField(
-            controller: drafts[selVar].name,
-            onChanged: (_) => setLocal(() {}),
-            style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
-            decoration: _dlgInputDecor('e.g. Small / Red'),
-          ),
-        ],
+          child: Text('Remove', style: GoogleFonts.inter(fontSize: 11.5, fontWeight: FontWeight.w600, color: const Color(0xFFFF3B30))),
+        ),
       ]),
     );
   }
 
-  TextStyle _variantHeaderStyle() => GoogleFonts.inter(
-      fontSize: 9.5, fontWeight: FontWeight.w600, color: AppColors.textMuted, letterSpacing: 0.5);
+  void _promptRenameVariant(_VariantDraft d, StateSetter setLocal) {
+    final ctrl = TextEditingController(text: d.name.text);
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        child: SizedBox(
+          width: 360,
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('Variant Name', style: GoogleFonts.manrope(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textDark)),
+              const SizedBox(height: 14),
+              TextField(
+                controller: ctrl,
+                autofocus: true,
+                style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
+                decoration: _dlgInputDecor('e.g. Blue / 32GB'),
+                onSubmitted: (_) {
+                  d.name.text = ctrl.text.trim();
+                  Navigator.pop(ctx);
+                  setLocal(() {});
+                },
+              ),
+              const SizedBox(height: 18),
+              Row(children: [
+                const Spacer(),
+                TextButton(onPressed: () => Navigator.pop(ctx), child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textMuted))),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: () {
+                    d.name.text = ctrl.text.trim();
+                    Navigator.pop(ctx);
+                    setLocal(() {});
+                  },
+                  style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: Colors.white, elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)), padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12)),
+                  child: Text('Save', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700)),
+                ),
+              ]),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Dealer/Supplier + Purchase Date fields shown on the product form.
+  Widget _supplierAndDateRow({
+    required TextEditingController supplierCtrl,
+    required DateTime? purchaseDate,
+    required void Function(DateTime?) onPickDate,
+  }) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      _dlgLabel('DEALER / SUPPLIER'),
+      const SizedBox(height: 6),
+      Builder(builder: (fctx) => TextFormField(
+        controller: supplierCtrl,
+        textInputAction: TextInputAction.next,
+        onFieldSubmitted: (_) => FocusScope.of(fctx).nextFocus(),
+        style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
+        decoration: _dlgInputDecor('e.g. Metro Wholesale'),
+      )),
+      const SizedBox(height: 16),
+      _dlgLabel('PURCHASE DATE'),
+      const SizedBox(height: 6),
+      Builder(builder: (ctx) => GestureDetector(
+        onTap: () async {
+          final now = DateTime.now();
+          final picked = await showDatePicker(
+            context: ctx,
+            initialDate: purchaseDate ?? now,
+            firstDate: DateTime(now.year - 5),
+            lastDate: DateTime(now.year + 1),
+          );
+          if (picked != null) onPickDate(picked);
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 13),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(9),
+            border: Border.all(color: AppColors.border),
+          ),
+          child: Row(children: [
+            const Icon(Icons.calendar_today_outlined, size: 15, color: AppColors.textMuted),
+            const SizedBox(width: 10),
+            Text(purchaseDate != null ? _fmtDate(purchaseDate) : 'Select purchase date',
+                style: GoogleFonts.inter(fontSize: 13, color: purchaseDate != null ? AppColors.textDark : AppColors.textMuted)),
+            const Spacer(),
+            if (purchaseDate != null)
+              GestureDetector(
+                onTap: () => onPickDate(null),
+                child: const Icon(Icons.close_rounded, size: 15, color: AppColors.textMuted),
+              ),
+          ]),
+        ),
+      )),
+    ]);
+  }
 
   /// Convert drafts → variants, deriving SKU/barcode from the parent when blank.
   List<ProductVariant> _buildVariantsFromDrafts(
@@ -7952,6 +8027,8 @@ end tell
     String category = _userCategories.contains(p.category) ? p.category : (_userCategories..add(p.category)).last;
     String unit = kProductUnits.contains(p.unit) ? p.unit : 'pcs';
     final barcodeNoCtrl = TextEditingController(text: p.barcodeNo);
+    final supplierCtrl = TextEditingController(text: p.supplier);
+    DateTime? purchaseDate = p.purchaseDate;
     final variantDrafts = p.variants.map(_VariantDraft.fromVariant).toList();
     int selVar = -1; // -1 = base product; else index into variantDrafts
 
@@ -8037,24 +8114,37 @@ end tell
                         ]),
                         const SizedBox(width: 14),
                         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          _dlgLabel('PRODUCT NAME'),
-                          const SizedBox(height: 6),
-                          TextFormField(
-                            controller: nameCtrl,
-                            validator: (v) => v != null && v.trim().isNotEmpty ? null : 'Required',
-                            style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
-                            decoration: _dlgInputDecor('e.g. Wireless Keyboard'),
-                          ),
+                          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Expanded(flex: 2, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              _dlgLabel('PRODUCT NAME'),
+                              const SizedBox(height: 6),
+                              TextFormField(
+                                controller: nameCtrl,
+                                textInputAction: TextInputAction.next,
+                                onFieldSubmitted: (_) => FocusScope.of(ctx).nextFocus(),
+                                validator: (v) => v != null && v.trim().isNotEmpty ? null : 'Required',
+                                style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
+                                decoration: _dlgInputDecor('e.g. Wireless Keyboard'),
+                              ),
+                            ])),
+                            const SizedBox(width: 14),
+                            SizedBox(width: 150, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              _dlgLabel('VARIANT'),
+                              const SizedBox(height: 6),
+                              _variantDropdown(drafts: variantDrafts, selVar: selVar, onSelect: (v) => setLocal(() => selVar = v), setLocal: setLocal),
+                            ])),
+                          ]),
+                          _variantEditNote(drafts: variantDrafts, selVar: selVar, onSelect: (v) => setLocal(() => selVar = v), setLocal: setLocal),
                         ])),
                       ]),
-                      const SizedBox(height: 16),
-                      _variantSelector(drafts: variantDrafts, selVar: selVar, onSelect: (v) => setLocal(() => selVar = v), setLocal: setLocal),
                       const SizedBox(height: 16),
                       Row(children: [
                         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                           _dlgLabel('SKU'),
                           const SizedBox(height: 6),
                           TextFormField(controller: skuController,
+                              textInputAction: TextInputAction.next,
+                              onFieldSubmitted: (_) => FocusScope.of(ctx).nextFocus(),
                               style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
                               decoration: _dlgInputDecor('e.g. WK-00123')),
                         ])),
@@ -8095,12 +8185,20 @@ end tell
                         ])),
                       ]),
                       const SizedBox(height: 16),
+                      _supplierAndDateRow(
+                        supplierCtrl: supplierCtrl,
+                        purchaseDate: purchaseDate,
+                        onPickDate: (d) => setLocal(() => purchaseDate = d),
+                      ),
+                      const SizedBox(height: 16),
                       Row(children: [
                         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                           _dlgLabel(activeVar != null ? 'VARIANT PRICE ($_currencySymbol)' : 'SELLING PRICE ($_currencySymbol)'),
                           const SizedBox(height: 6),
                           TextFormField(
                             controller: priceController,
+                            textInputAction: TextInputAction.next,
+                            onFieldSubmitted: (_) => FocusScope.of(ctx).nextFocus(),
                             keyboardType: const TextInputType.numberWithOptions(decimal: true),
                             inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
                             validator: (v) => activeVar != null || (v != null && v.isNotEmpty && double.tryParse(v) != null) ? null : 'Required',
@@ -8114,6 +8212,8 @@ end tell
                           const SizedBox(height: 6),
                           TextFormField(
                             controller: stockController,
+                            textInputAction: TextInputAction.next,
+                            onFieldSubmitted: (_) => FocusScope.of(ctx).nextFocus(),
                             enabled: activeVar != null || variantDrafts.isEmpty,
                             keyboardType: TextInputType.number,
                             inputFormatters: [FilteringTextInputFormatter.digitsOnly],
@@ -8136,6 +8236,8 @@ end tell
                           const SizedBox(height: 6),
                           TextFormField(
                             controller: buyingPriceCtrl,
+                            textInputAction: TextInputAction.next,
+                            onFieldSubmitted: (_) => FocusScope.of(ctx).nextFocus(),
                             keyboardType: const TextInputType.numberWithOptions(decimal: true),
                             inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
                             style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
@@ -8148,6 +8250,7 @@ end tell
                           const SizedBox(height: 6),
                           TextFormField(
                             controller: taxPercentCtrl,
+                            textInputAction: TextInputAction.done,
                             keyboardType: const TextInputType.numberWithOptions(decimal: true),
                             inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
                             style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
@@ -8278,6 +8381,8 @@ end tell
                           description: tags.join(', '),
                           unit: unit,
                           barcodeNo: newBarcodeNo,
+                          supplier: supplierCtrl.text.trim(),
+                          purchaseDate: purchaseDate,
                           variants: variants,
                         );
                         await LocalDbService.updateProduct(updated);
@@ -8348,6 +8453,8 @@ end tell
     String category = _userCategories.isNotEmpty ? _userCategories.first : '';
     String unit = 'pcs';
     String barcodeNo = '';
+    final supplierCtrl = TextEditingController();
+    DateTime? purchaseDate;
     bool skuAutoMode = true;
     final variantDrafts = <_VariantDraft>[];
     int selVar = -1; // -1 = base product; else index into variantDrafts
@@ -8470,33 +8577,38 @@ end tell
                               ],
                             ),
                             const SizedBox(width: 14),
-                            // Name
+                            // Name + Variant
                             Expanded(
                               child: Column(
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.start,
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  _dlgLabel('PRODUCT NAME'),
-                                  const SizedBox(height: 6),
-                                  TextFormField(
-                                    controller: nameCtrl,
-                                    validator: (v) =>
-                                        v != null && v.trim().isNotEmpty
-                                            ? null
-                                            : 'Required',
-                                    style: GoogleFonts.inter(
-                                        fontSize: 13,
-                                        color: AppColors.textDark),
-                                    decoration: _dlgInputDecor(
-                                        'e.g. Wireless Keyboard'),
-                                  ),
+                                  Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                    Expanded(flex: 2, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                      _dlgLabel('PRODUCT NAME'),
+                                      const SizedBox(height: 6),
+                                      TextFormField(
+                                        controller: nameCtrl,
+                                        textInputAction: TextInputAction.next,
+                                        onFieldSubmitted: (_) => FocusScope.of(ctx).nextFocus(),
+                                        validator: (v) =>
+                                            v != null && v.trim().isNotEmpty ? null : 'Required',
+                                        style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
+                                        decoration: _dlgInputDecor('e.g. Wireless Keyboard'),
+                                      ),
+                                    ])),
+                                    const SizedBox(width: 14),
+                                    SizedBox(width: 150, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                      _dlgLabel('VARIANT'),
+                                      const SizedBox(height: 6),
+                                      _variantDropdown(drafts: variantDrafts, selVar: selVar, onSelect: (v) => setLocal(() => selVar = v), setLocal: setLocal),
+                                    ])),
+                                  ]),
+                                  _variantEditNote(drafts: variantDrafts, selVar: selVar, onSelect: (v) => setLocal(() => selVar = v), setLocal: setLocal),
                                 ],
                               ),
                             ),
                           ],
                         ),
-                        const SizedBox(height: 16),
-                        _variantSelector(drafts: variantDrafts, selVar: selVar, onSelect: (v) => setLocal(() => selVar = v), setLocal: setLocal),
                         const SizedBox(height: 16),
                         // SKU + Category row
                         Row(
@@ -8510,6 +8622,8 @@ end tell
                                   const SizedBox(height: 6),
                                   TextFormField(
                                     controller: skuController,
+                                    textInputAction: TextInputAction.next,
+                                    onFieldSubmitted: (_) => FocusScope.of(ctx).nextFocus(),
                                     style: GoogleFonts.inter(
                                         fontSize: 13,
                                         color: AppColors.textDark),
@@ -8570,6 +8684,12 @@ end tell
                           ],
                         ),
                         const SizedBox(height: 16),
+                        _supplierAndDateRow(
+                          supplierCtrl: supplierCtrl,
+                          purchaseDate: purchaseDate,
+                          onPickDate: (d) => setLocal(() => purchaseDate = d),
+                        ),
+                        const SizedBox(height: 16),
                         // Price + Stock row
                         Row(
                           children: [
@@ -8581,6 +8701,8 @@ end tell
                                   const SizedBox(height: 6),
                                   TextFormField(
                                     controller: priceController,
+                                    textInputAction: TextInputAction.next,
+                                    onFieldSubmitted: (_) => FocusScope.of(ctx).nextFocus(),
                                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                                     inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
                                     validator: (v) {
@@ -8604,6 +8726,8 @@ end tell
                                   const SizedBox(height: 6),
                                   TextFormField(
                                     controller: stockController,
+                                    textInputAction: TextInputAction.next,
+                                    onFieldSubmitted: (_) => FocusScope.of(ctx).nextFocus(),
                                     enabled: activeVar != null || variantDrafts.isEmpty,
                                     keyboardType: TextInputType.number,
                                     inputFormatters: [FilteringTextInputFormatter.digitsOnly],
@@ -8634,6 +8758,8 @@ end tell
                                   const SizedBox(height: 6),
                                   TextFormField(
                                     controller: buyingPriceCtrl,
+                                    textInputAction: TextInputAction.next,
+                                    onFieldSubmitted: (_) => FocusScope.of(ctx).nextFocus(),
                                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                                     inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
                                     style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
@@ -8651,6 +8777,7 @@ end tell
                                   const SizedBox(height: 6),
                                   TextFormField(
                                     controller: taxPercentCtrl,
+                                    textInputAction: TextInputAction.done,
                                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                                     inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
                                     style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
@@ -8801,6 +8928,8 @@ end tell
                             barcodeNo: barcodeNo.isEmpty
                               ? await LocalDbService.getNextBarcodeNo()
                               : barcodeNo,
+                            supplier: supplierCtrl.text.trim(),
+                            purchaseDate: purchaseDate,
                             variants: variants,
                           );
                           await LocalDbService.insertProduct(newProduct);
@@ -9751,6 +9880,11 @@ end tell
     if (mounted) setState(() => _reportCustomers = customers);
   }
 
+  Future<void> _loadReportDealers() async {
+    final dealers = await LocalDbService.getDealers();
+    if (mounted) setState(() => _reportDealers = dealers);
+  }
+
   Widget _buildReportsView() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(28),
@@ -9779,6 +9913,7 @@ end tell
           const SizedBox(height: 24),
           if (_reportView == 'Sales')         _buildSalesReport()
           else if (_reportView == 'Customers') _buildCustomersReport()
+          else if (_reportView == 'Dealers')   _buildDealersReport()
           else                                 _buildInventoryReport(),
         ],
       ),
@@ -10316,6 +10451,320 @@ end tell
     _loadReportCustomers();
   }
 
+  // ── Dealers: add / detail / persistence ────────────────────────────────────
+
+  Future<void> _saveDealerAndSync(Dealer d) async {
+    await LocalDbService.saveDealer(d);
+    ConnectivityService.instance.syncNow();
+    await _loadReportDealers();
+  }
+
+  Future<void> _deleteDealer(Dealer d) async {
+    await LocalDbService.deleteDealer(d.id);
+    try {
+      final userId = Supabase.instance.client.auth.currentUser?.id;
+      if (userId != null) {
+        await Supabase.instance.client
+            .from('dealers')
+            .delete()
+            .eq('id', d.id)
+            .eq('user_id', userId);
+      }
+    } catch (_) {}
+    await _loadReportDealers();
+  }
+
+  Widget _dealerDialogField(String label, TextEditingController ctrl,
+      {String hint = '', TextInputType? keyboard}) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(label, style: GoogleFonts.inter(fontSize: 10.5, fontWeight: FontWeight.w600, color: AppColors.textMuted, letterSpacing: 0.5)),
+      const SizedBox(height: 6),
+      TextField(
+        controller: ctrl,
+        keyboardType: keyboard,
+        inputFormatters: keyboard == const TextInputType.numberWithOptions(decimal: true)
+            ? [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))]
+            : null,
+        style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
+        decoration: InputDecoration(
+          hintText: hint,
+          hintStyle: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted),
+          filled: true,
+          fillColor: AppColors.surface,
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(9), borderSide: BorderSide(color: AppColors.border)),
+          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(9), borderSide: BorderSide(color: AppColors.border)),
+          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(9), borderSide: BorderSide(color: AppColors.primary, width: 1.5)),
+        ),
+      ),
+    ]);
+  }
+
+  void _showAddDealerDialog() {
+    final nameCtrl = TextEditingController();
+    final companyCtrl = TextEditingController();
+    final phoneCtrl = TextEditingController();
+    final openingCtrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        child: SizedBox(
+          width: 420,
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Container(
+                  width: 34, height: 34,
+                  decoration: BoxDecoration(color: AppColors.primary.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(9)),
+                  child: Icon(Icons.local_shipping_outlined, size: 18, color: AppColors.primary),
+                ),
+                const SizedBox(width: 12),
+                Text('Add Dealer', style: GoogleFonts.manrope(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textDark)),
+                const Spacer(),
+                GestureDetector(
+                  onTap: () => Navigator.pop(ctx),
+                  child: const Icon(Icons.close_rounded, size: 18, color: AppColors.textMuted),
+                ),
+              ]),
+              const SizedBox(height: 20),
+              _dealerDialogField('DEALER NAME', nameCtrl, hint: 'e.g. Metro Gadgetz'),
+              const SizedBox(height: 14),
+              _dealerDialogField('COMPANY (optional)', companyCtrl, hint: 'Distributor / firm name'),
+              const SizedBox(height: 14),
+              _dealerDialogField('PHONE (optional)', phoneCtrl, hint: 'Contact number', keyboard: TextInputType.phone),
+              const SizedBox(height: 14),
+              _dealerDialogField('OPENING BALANCE PAYABLE (optional)', openingCtrl,
+                  hint: 'Amount you already owe', keyboard: const TextInputType.numberWithOptions(decimal: true)),
+              const SizedBox(height: 22),
+              Row(children: [
+                const Spacer(),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textMuted)),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: () async {
+                    final name = nameCtrl.text.trim();
+                    if (name.isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Enter a dealer name', style: GoogleFonts.inter(color: Colors.white)), backgroundColor: AppColors.error, behavior: SnackBarBehavior.floating),
+                      );
+                      return;
+                    }
+                    final opening = double.tryParse(openingCtrl.text) ?? 0;
+                    Navigator.pop(ctx);
+                    await _saveDealerAndSync(Dealer(
+                      id: const Uuid().v4(),
+                      name: name,
+                      company: companyCtrl.text.trim(),
+                      phone: phoneCtrl.text.trim(),
+                      balancePayable: opening,
+                      createdAt: DateTime.now(),
+                    ));
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  ),
+                  child: Text('Add Dealer', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700)),
+                ),
+              ]),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showDealerDetail(Dealer d) {
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        child: SizedBox(
+          width: 440,
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Container(
+                  width: 44, height: 44,
+                  decoration: BoxDecoration(color: AppColors.primary.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(12)),
+                  alignment: Alignment.center,
+                  child: Text(d.name.isNotEmpty ? d.name[0].toUpperCase() : '?',
+                      style: GoogleFonts.manrope(fontSize: 20, fontWeight: FontWeight.w800, color: AppColors.primary)),
+                ),
+                const SizedBox(width: 14),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(d.name, style: GoogleFonts.manrope(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textDark)),
+                  if (d.company?.isNotEmpty == true || d.phone?.isNotEmpty == true)
+                    Text([d.company, d.phone].where((e) => e?.isNotEmpty == true).join(' · '),
+                        style: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted)),
+                ])),
+                GestureDetector(
+                  onTap: () => Navigator.pop(ctx),
+                  child: const Icon(Icons.close_rounded, size: 18, color: AppColors.textMuted),
+                ),
+              ]),
+              const SizedBox(height: 20),
+              Row(children: [
+                Expanded(child: _dealerStatBox('Total Purchased', _fmtComma(d.totalPurchased), AppColors.textDark, AppColors.surface)),
+                const SizedBox(width: 12),
+                Expanded(child: _dealerStatBox('You Owe', _fmtComma(d.balancePayable),
+                    d.balancePayable > 0 ? const Color(0xFFE65100) : AppColors.textDark,
+                    d.balancePayable > 0 ? const Color(0xFFFFF3E0) : AppColors.surface)),
+              ]),
+              const SizedBox(height: 20),
+              Row(children: [
+                Expanded(child: OutlinedButton.icon(
+                  onPressed: () { Navigator.pop(ctx); _showDealerPurchaseDialog(d); },
+                  icon: const Icon(Icons.add_shopping_cart_outlined, size: 16),
+                  label: Text('Record Purchase', style: GoogleFonts.inter(fontSize: 12.5, fontWeight: FontWeight.w600)),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.primary,
+                    side: BorderSide(color: AppColors.primary.withValues(alpha: 0.4)),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+                  ),
+                )),
+                const SizedBox(width: 12),
+                Expanded(child: ElevatedButton.icon(
+                  onPressed: d.balancePayable > 0 ? () { Navigator.pop(ctx); _showDealerPaymentDialog(d); } : null,
+                  icon: const Icon(Icons.payments_outlined, size: 16),
+                  label: Text('Pay Dealer', style: GoogleFonts.inter(fontSize: 12.5, fontWeight: FontWeight.w700)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF34C759),
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: const Color(0xFF34C759).withValues(alpha: 0.4),
+                    elevation: 0,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)),
+                  ),
+                )),
+              ]),
+              const SizedBox(height: 14),
+              Center(child: TextButton.icon(
+                onPressed: () async {
+                  Navigator.pop(ctx);
+                  await _deleteDealer(d);
+                },
+                icon: const Icon(Icons.delete_outline_rounded, size: 15, color: Color(0xFFFF3B30)),
+                label: Text('Delete Dealer', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: const Color(0xFFFF3B30))),
+              )),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _dealerStatBox(String label, String value, Color valueColor, Color bg) => Container(
+    padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(12), border: Border.all(color: AppColors.border)),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(label, style: GoogleFonts.inter(fontSize: 11, color: AppColors.textMuted)),
+      const SizedBox(height: 4),
+      Text(value, style: GoogleFonts.manrope(fontSize: 18, fontWeight: FontWeight.w800, color: valueColor, letterSpacing: -0.5)),
+    ]),
+  );
+
+  void _showDealerPurchaseDialog(Dealer d) {
+    final amountCtrl = TextEditingController();
+    final paidCtrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        child: SizedBox(
+          width: 380,
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('Record Purchase', style: GoogleFonts.manrope(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textDark)),
+              const SizedBox(height: 4),
+              Text('from ${d.name}', style: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted)),
+              const SizedBox(height: 20),
+              _dealerDialogField('PURCHASE AMOUNT', amountCtrl, hint: '0.00', keyboard: const TextInputType.numberWithOptions(decimal: true)),
+              const SizedBox(height: 14),
+              _dealerDialogField('PAID NOW (optional)', paidCtrl, hint: '0.00 — leave blank if fully on credit', keyboard: const TextInputType.numberWithOptions(decimal: true)),
+              const SizedBox(height: 22),
+              Row(children: [
+                const Spacer(),
+                TextButton(onPressed: () => Navigator.pop(ctx), child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textMuted))),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: () async {
+                    final amount = double.tryParse(amountCtrl.text) ?? 0;
+                    if (amount <= 0) return;
+                    final paid = (double.tryParse(paidCtrl.text) ?? 0).clamp(0, amount).toDouble();
+                    Navigator.pop(ctx);
+                    await LocalDbService.recordDealerPurchase(d.id, amount, paid);
+                    ConnectivityService.instance.syncNow();
+                    await _loadReportDealers();
+                  },
+                  style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: Colors.white, elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)), padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12)),
+                  child: Text('Save', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700)),
+                ),
+              ]),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showDealerPaymentDialog(Dealer d) {
+    final amountCtrl = TextEditingController(text: d.balancePayable.toStringAsFixed(2));
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        child: SizedBox(
+          width: 380,
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('Pay Dealer', style: GoogleFonts.manrope(fontSize: 16, fontWeight: FontWeight.w800, color: AppColors.textDark)),
+              const SizedBox(height: 4),
+              Text('${d.name} · you owe ${_fmtComma(d.balancePayable)}', style: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted)),
+              const SizedBox(height: 20),
+              _dealerDialogField('PAYMENT AMOUNT', amountCtrl, hint: '0.00', keyboard: const TextInputType.numberWithOptions(decimal: true)),
+              const SizedBox(height: 22),
+              Row(children: [
+                const Spacer(),
+                TextButton(onPressed: () => Navigator.pop(ctx), child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textMuted))),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: () async {
+                    final amount = double.tryParse(amountCtrl.text) ?? 0;
+                    if (amount <= 0) return;
+                    Navigator.pop(ctx);
+                    await LocalDbService.recordDealerPayment(d.id, amount);
+                    ConnectivityService.instance.syncNow();
+                    await _loadReportDealers();
+                  },
+                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF34C759), foregroundColor: Colors.white, elevation: 0, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(9)), padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12)),
+                  child: Text('Confirm Payment', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700)),
+                ),
+              ]),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
   // ── Owner / Staff access ──────────────────────────────────────────────────
 
   void _lockOwnerMode() {
@@ -10685,6 +11134,204 @@ end tell
                     const Divider(height: 1, color: AppColors.border),
                   ]);
                 }).toList();
+                })(),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ── Dealers sub-view (suppliers) ────────────────────────────────────────────
+
+  Widget _buildDealersReport() {
+    final total = _reportDealers.length;
+    final totalPurchased = _reportDealers.fold<double>(0, (s, d) => s + d.totalPurchased);
+    final totalPayable = _reportDealers.fold<double>(0, (s, d) => s + d.balancePayable);
+
+    return Column(
+      children: [
+        Row(children: [
+          _reportSummaryCard('Total Dealers',    '$total',                  Icons.local_shipping_outlined, AppColors.accentBlue),
+          const SizedBox(width: 16),
+          _reportSummaryCard('Total Purchased',  _fmtComma(totalPurchased), Icons.shopping_bag_outlined,   AppColors.accent),
+          if (totalPayable > 0) ...[
+            const SizedBox(width: 16),
+            Expanded(
+              child: GestureDetector(
+                onTap: () => setState(() => _showPayableOnly = !_showPayableOnly),
+                child: Container(
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: _showPayableOnly ? const Color(0xFFE65100) : AppColors.border, width: _showPayableOnly ? 2 : 1),
+                  ),
+                  child: Row(children: [
+                    Container(
+                      width: 40, height: 40,
+                      decoration: BoxDecoration(color: const Color(0xFFE65100).withValues(alpha: 0.1), borderRadius: BorderRadius.circular(10)),
+                      child: const Icon(Icons.account_balance_wallet_outlined, size: 20, color: Color(0xFFE65100)),
+                    ),
+                    const SizedBox(width: 14),
+                    Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(_fmtComma(totalPayable), style: GoogleFonts.manrope(fontSize: 18, fontWeight: FontWeight.w800, color: AppColors.textDark, letterSpacing: -0.5)),
+                      Text('You Owe (Payable)', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w400, color: AppColors.textMuted)),
+                    ]),
+                  ]),
+                ),
+              ),
+            ),
+          ] else
+            const Expanded(child: SizedBox()),
+        ]),
+        const SizedBox(height: 24),
+        Container(
+          padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14), border: Border.all(color: AppColors.border)),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('All Dealers', style: GoogleFonts.manrope(fontSize: 15, fontWeight: FontWeight.w700, color: AppColors.textDark)),
+                  Row(children: [
+                    Text(_showPayableOnly ? 'Showing dealers you owe' : '${_reportDealers.length} records',
+                        style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w300,
+                            color: _showPayableOnly ? const Color(0xFFE65100) : AppColors.textMuted)),
+                    if (_showPayableOnly) ...[
+                      const SizedBox(width: 6),
+                      GestureDetector(
+                        onTap: () => setState(() => _showPayableOnly = false),
+                        child: const Icon(Icons.close_rounded, size: 14, color: Color(0xFFE65100)),
+                      ),
+                    ],
+                  ]),
+                ])),
+                const SizedBox(width: 16),
+                SizedBox(
+                  width: 240,
+                  height: 36,
+                  child: Container(
+                    decoration: BoxDecoration(color: AppColors.surface, borderRadius: BorderRadius.circular(10), border: Border.all(color: AppColors.border)),
+                    child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+                      const SizedBox(width: 10),
+                      const Icon(Icons.search_rounded, size: 15, color: AppColors.textMuted),
+                      const SizedBox(width: 7),
+                      Expanded(
+                        child: TextField(
+                          onChanged: (v) => setState(() => _dealerSearchQuery = v),
+                          style: GoogleFonts.inter(fontSize: 12, color: AppColors.textDark),
+                          decoration: InputDecoration(
+                            hintText: 'Search name or company...',
+                            hintStyle: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted),
+                            border: InputBorder.none, isDense: true, contentPadding: EdgeInsets.zero,
+                          ),
+                        ),
+                      ),
+                      if (_dealerSearchQuery.isNotEmpty)
+                        GestureDetector(
+                          onTap: () => setState(() => _dealerSearchQuery = ''),
+                          child: const Padding(
+                            padding: EdgeInsets.only(right: 8),
+                            child: Icon(Icons.close_rounded, size: 13, color: AppColors.textMuted),
+                          ),
+                        )
+                      else
+                        const SizedBox(width: 8),
+                    ]),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                GestureDetector(
+                  onTap: _showAddDealerDialog,
+                  child: Container(
+                    height: 36,
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    decoration: BoxDecoration(color: AppColors.primary, borderRadius: BorderRadius.circular(10)),
+                    child: Row(children: [
+                      const Icon(Icons.add_rounded, size: 16, color: Colors.white),
+                      const SizedBox(width: 5),
+                      Text('Add Dealer', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.white)),
+                    ]),
+                  ),
+                ),
+              ]),
+              const SizedBox(height: 16),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+                child: Row(children: [
+                  Expanded(flex: 1, child: _dashColHeader('#')),
+                  Expanded(flex: 4, child: _dashColHeader('DEALER')),
+                  Expanded(flex: 3, child: _dashColHeader('PURCHASED')),
+                  Expanded(flex: 3, child: _dashColHeader('YOU OWE')),
+                  Expanded(flex: 2, child: _dashColHeader('', right: true)),
+                ]),
+              ),
+              const Divider(height: 1, color: AppColors.border),
+              if (_reportDealers.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 32),
+                  child: Center(
+                    child: Column(children: [
+                      Text('No dealers yet', style: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted)),
+                      const SizedBox(height: 6),
+                      Text('Add suppliers you buy stock from', style: GoogleFonts.inter(fontSize: 11, color: AppColors.textMuted)),
+                    ]),
+                  ),
+                )
+              else
+                ...(() {
+                  var filtered = _showPayableOnly
+                      ? _reportDealers.where((d) => d.balancePayable > 0).toList()
+                      : _reportDealers;
+                  if (_dealerSearchQuery.isNotEmpty) {
+                    final q = _dealerSearchQuery.toLowerCase();
+                    filtered = filtered.where((d) =>
+                        d.name.toLowerCase().contains(q) ||
+                        (d.company?.toLowerCase().contains(q) ?? false) ||
+                        (d.phone?.toLowerCase().contains(q) ?? false)).toList();
+                  }
+                  if (filtered.isEmpty) return [
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 32),
+                      child: Center(child: Text('No results for "$_dealerSearchQuery"', style: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted))),
+                    )
+                  ];
+                  return filtered.asMap().entries.map((entry) {
+                    final i = entry.key;
+                    final d = entry.value;
+                    return Column(children: [
+                      InkWell(
+                        onTap: () => _showDealerDetail(d),
+                        borderRadius: BorderRadius.circular(6),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 14),
+                          child: Row(children: [
+                            Expanded(flex: 1, child: Text('${i + 1}', style: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted))),
+                            Expanded(flex: 4, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              Text(d.name, style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.textDark)),
+                              if (d.company?.isNotEmpty == true)
+                                Text(d.company!, style: GoogleFonts.inter(fontSize: 11, color: AppColors.textMuted)),
+                            ])),
+                            Expanded(flex: 3, child: Text(_fmtComma(d.totalPurchased), style: GoogleFonts.inter(fontSize: 12, color: AppColors.textDark))),
+                            Expanded(flex: 3, child: d.balancePayable > 0
+                              ? Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                  decoration: BoxDecoration(color: const Color(0xFFFFF3E0), borderRadius: BorderRadius.circular(20)),
+                                  child: Text(_fmtComma(d.balancePayable),
+                                      style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w700, color: const Color(0xFFE65100))),
+                                )
+                              : Text('—', style: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted))),
+                            Expanded(flex: 2, child: Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+                              const Icon(Icons.chevron_right_rounded, size: 16, color: AppColors.textMuted),
+                            ])),
+                          ]),
+                        ),
+                      ),
+                      const Divider(height: 1, color: AppColors.border),
+                    ]);
+                  }).toList();
                 })(),
             ],
           ),

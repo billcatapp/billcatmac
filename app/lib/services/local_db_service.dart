@@ -4,6 +4,7 @@ import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import 'package:uuid/uuid.dart';
 import '../models/customer.dart';
+import '../models/dealer.dart';
 import '../models/product.dart';
 import '../models/transaction_record.dart';
 
@@ -35,7 +36,7 @@ class LocalDbService {
     final dbPath = await _appSupportPath();
     return openDatabase(
       join(dbPath, 'billcat_$userId.db'),
-      version: 14,
+      version: 16,
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 4) {
           try { await db.execute('ALTER TABLE products ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0'); } catch (_) {}
@@ -85,6 +86,26 @@ class LocalDbService {
         if (oldVersion < 14) {
           try { await db.execute("ALTER TABLE products ADD COLUMN variants TEXT NOT NULL DEFAULT '[]'"); } catch (_) {}
         }
+        if (oldVersion < 15) {
+          try {
+            await db.execute('''
+              CREATE TABLE IF NOT EXISTS dealers (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                phone TEXT,
+                company TEXT NOT NULL DEFAULT '',
+                total_purchased REAL NOT NULL DEFAULT 0,
+                balance_payable REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                synced INTEGER NOT NULL DEFAULT 0
+              )
+            ''');
+          } catch (_) {}
+        }
+        if (oldVersion < 16) {
+          try { await db.execute("ALTER TABLE products ADD COLUMN supplier TEXT NOT NULL DEFAULT ''"); } catch (_) {}
+          try { await db.execute("ALTER TABLE products ADD COLUMN purchase_date TEXT"); } catch (_) {}
+        }
       },
       onCreate: (db, _) => _createTables(db),
     );
@@ -105,6 +126,8 @@ class LocalDbService {
         description TEXT NOT NULL DEFAULT '',
         unit TEXT NOT NULL DEFAULT 'pcs',
         barcode_no TEXT NOT NULL DEFAULT '',
+        supplier TEXT NOT NULL DEFAULT '',
+        purchase_date TEXT,
         variants TEXT NOT NULL DEFAULT '[]',
         synced INTEGER NOT NULL DEFAULT 0,
         deleted INTEGER NOT NULL DEFAULT 0
@@ -140,6 +163,18 @@ class LocalDbService {
     await db.execute('''
       CREATE TABLE categories (
         name TEXT PRIMARY KEY,
+        synced INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE dealers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        phone TEXT,
+        company TEXT NOT NULL DEFAULT '',
+        total_purchased REAL NOT NULL DEFAULT 0,
+        balance_payable REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
         synced INTEGER NOT NULL DEFAULT 0
       )
     ''');
@@ -541,5 +576,68 @@ class LocalDbService {
           orderBy: 'created_at DESC');
     }
     return rows.map(TransactionRecord.fromMap).toList();
+  }
+
+  // ── Dealers (suppliers) ────────────────────────────────────────────────────
+
+  static Future<List<Dealer>> getDealers() async {
+    final database = await db;
+    final rows = await database.query('dealers', orderBy: 'name ASC');
+    return rows.map(Dealer.fromMap).toList();
+  }
+
+  static Future<void> saveDealer(Dealer d) async {
+    final database = await db;
+    final map = d.toMap();
+    map['synced'] = 0;
+    await database.insert('dealers', map,
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  static Future<void> deleteDealer(String id) async {
+    final database = await db;
+    await database.delete('dealers', where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// Record a purchase from a dealer: adds to total purchased and to the
+  /// amount owed. If [paidNow] > 0, that much is settled immediately.
+  static Future<void> recordDealerPurchase(String id, double amount, double paidNow) async {
+    final database = await db;
+    await database.rawUpdate(
+      'UPDATE dealers SET total_purchased = total_purchased + ?, '
+      'balance_payable = balance_payable + ?, synced = 0 WHERE id = ?',
+      [amount, amount - paidNow, id],
+    );
+  }
+
+  /// Record a payment made to a dealer, reducing the amount owed.
+  static Future<void> recordDealerPayment(String id, double amount) async {
+    final database = await db;
+    await database.rawUpdate(
+      'UPDATE dealers SET balance_payable = balance_payable - ?, synced = 0 WHERE id = ?',
+      [amount, id],
+    );
+  }
+
+  static Future<List<Dealer>> getUnsyncedDealers() async {
+    final database = await db;
+    final rows = await database.query('dealers', where: 'synced = ?', whereArgs: [0]);
+    return rows.map(Dealer.fromMap).toList();
+  }
+
+  static Future<void> markDealerSynced(String id) async {
+    final database = await db;
+    await database.update('dealers', {'synced': 1}, where: 'id = ?', whereArgs: [id]);
+  }
+
+  static Future<void> insertDealersSynced(List<Dealer> dealers) async {
+    final database = await db;
+    final batch = database.batch();
+    for (final d in dealers) {
+      final map = d.toMap();
+      map['synced'] = 1;
+      batch.insert('dealers', map, conflictAlgorithm: ConflictAlgorithm.replace);
+    }
+    await batch.commit(noResult: true);
   }
 }

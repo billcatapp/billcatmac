@@ -80,6 +80,8 @@ class Product {
   final String description;
   final String unit;
   final String barcodeNo;
+  final String supplier;
+  final DateTime? purchaseDate;
   final List<ProductVariant> variants;
 
   const Product({
@@ -95,6 +97,8 @@ class Product {
     this.description = '',
     this.unit = 'pcs',
     this.barcodeNo = '',
+    this.supplier = '',
+    this.purchaseDate,
     this.variants = const [],
   });
 
@@ -113,6 +117,8 @@ class Product {
     'description': description,
     'unit': unit,
     'barcode_no': barcodeNo,
+    'supplier': supplier,
+    'purchase_date': purchaseDate?.toIso8601String(),
     'variants': encodeVariants(variants),
     'synced': 0,
   };
@@ -130,15 +136,21 @@ class Product {
     description: (m['description'] as String?) ?? '',
     unit: (m['unit'] as String?) ?? 'pcs',
     barcodeNo: (m['barcode_no'] as String?) ?? '',
+    supplier: (m['supplier'] as String?) ?? '',
+    purchaseDate: (m['purchase_date'] as String?)?.isNotEmpty == true
+        ? DateTime.tryParse(m['purchase_date'] as String)
+        : null,
     variants: decodeVariants(m['variants']),
   );
 
-  Product copyWith({int? stock, String? barcodeNo, List<ProductVariant>? variants}) => Product(
+  Product copyWith({int? stock, String? barcodeNo, String? supplier, DateTime? purchaseDate, List<ProductVariant>? variants}) => Product(
     id: id, name: name, price: price, buyingPrice: buyingPrice,
     taxPercent: taxPercent, category: category,
     emoji: emoji, sku: sku, stock: stock ?? this.stock,
     description: description, unit: unit,
     barcodeNo: barcodeNo ?? this.barcodeNo,
+    supplier: supplier ?? this.supplier,
+    purchaseDate: purchaseDate ?? this.purchaseDate,
     variants: variants ?? this.variants,
   );
 }

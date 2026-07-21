@@ -3,6 +3,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/customer.dart';
+import '../models/dealer.dart';
 import '../models/product.dart';
 import '../models/transaction_record.dart';
 import 'local_db_service.dart';
@@ -83,6 +84,8 @@ class ConnectivityService extends ChangeNotifier {
               'sku': p.sku,
               'stock': p.stock,
               'description': p.description,
+              'supplier': p.supplier,
+              'purchase_date': p.purchaseDate?.toIso8601String(),
               'variants': encodeVariants(p.variants),
             }).toList(),
           );
@@ -171,6 +174,30 @@ class ConnectivityService extends ChangeNotifier {
         }
       }
 
+      // ── Sync dealers (batch) ─────────────────────────────────────────────
+      final unsyncedDealers = await LocalDbService.getUnsyncedDealers();
+      if (unsyncedDealers.isNotEmpty) {
+        try {
+          await client.from('dealers').upsert(
+            unsyncedDealers.map((d) => {
+              'id': d.id,
+              'user_id': userId,
+              'name': d.name,
+              'phone': d.phone,
+              'company': d.company,
+              'total_purchased': d.totalPurchased,
+              'balance_payable': d.balancePayable,
+              'created_at': d.createdAt.toIso8601String(),
+            }).toList(),
+          );
+          for (final d in unsyncedDealers) {
+            await LocalDbService.markDealerSynced(d.id);
+          }
+        } catch (e) {
+          debugPrint('Dealer sync error: $e');
+        }
+      }
+
       // ── Sync categories ──────────────────────────────────────────────────
       final unsyncedCats = await LocalDbService.getUnsyncedCategories();
       if (unsyncedCats.isNotEmpty) {
@@ -238,6 +265,8 @@ class ConnectivityService extends ChangeNotifier {
                 'sku': r['sku'],
                 'stock': r['stock'],
                 'description': (r['description'] as String?) ?? '',
+                'supplier': (r['supplier'] as String?) ?? '',
+                'purchase_date': r['purchase_date'],
                 'variants': r['variants'],
                 'synced': 1,
               }))
@@ -288,6 +317,26 @@ class ConnectivityService extends ChangeNotifier {
               ))
           .toList();
       await LocalDbService.insertCustomersSynced(customers);
+    } catch (_) {}
+
+    try {
+      final dealerRows = await client
+          .from('dealers')
+          .select()
+          .eq('user_id', userId);
+      final dealers = (dealerRows as List)
+          .map((r) => Dealer(
+                id: r['id'],
+                name: r['name'],
+                phone: r['phone'],
+                company: r['company'],
+                totalPurchased: (r['total_purchased'] as num?)?.toDouble() ?? 0,
+                balancePayable: (r['balance_payable'] as num?)?.toDouble() ?? 0,
+                createdAt: DateTime.parse(r['created_at']),
+                synced: true,
+              ))
+          .toList();
+      await LocalDbService.insertDealersSynced(dealers);
     } catch (_) {}
 
     try {
