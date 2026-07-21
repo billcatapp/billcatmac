@@ -18,6 +18,7 @@ import '../../models/product.dart';
 import '../../models/transaction_record.dart';
 import '../../providers/cart_provider.dart';
 import '../../services/connectivity_service.dart';
+import '../../services/label_printer_service.dart';
 import '../../services/local_db_service.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/supabase_service.dart';
@@ -372,6 +373,7 @@ class _BillingScreenState extends State<BillingScreen> {
   }
 
   Future<void> _loadSettingsFromStorage() async {
+    LabelPrinterService.load(); // device-local label-printer profile (not synced)
     final s = await LocalDbService.getSettings();
     if (s.isEmpty || !mounted) return;
     setState(() {
@@ -6348,6 +6350,172 @@ end tell
     return map;
   }
 
+  // ── Label printer setup (raw TSPL/ZPL over TCP:9100) ───────────────────────
+  Future<void> _showLabelPrinterSetup() {
+    var profile = LabelPrinterService.cached;
+    final hostCtrl = TextEditingController(text: profile.host);
+    final portCtrl = TextEditingController(text: '${profile.port}');
+    return showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setLocal) {
+        final isNetwork = profile.transport == LabelTransport.network;
+        InputDecoration dec(String hint) => InputDecoration(
+          isDense: true, hintText: hint,
+          hintStyle: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted),
+          filled: true, fillColor: Colors.white,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(9), borderSide: const BorderSide(color: AppColors.border)),
+          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(9), borderSide: const BorderSide(color: AppColors.border)),
+          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(9), borderSide: const BorderSide(color: AppColors.primary, width: 1.5)),
+        );
+        Widget modeChip(String label, IconData icon, bool selected, VoidCallback onTap) => Expanded(
+          child: GestureDetector(
+            onTap: onTap,
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              decoration: BoxDecoration(
+                color: selected ? AppColors.primary.withValues(alpha: 0.06) : Colors.white,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: selected ? AppColors.primary : AppColors.border, width: selected ? 1.6 : 1),
+              ),
+              child: Column(children: [
+                Icon(icon, size: 20, color: selected ? AppColors.primary : AppColors.textMuted),
+                const SizedBox(height: 5),
+                Text(label, style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: selected ? AppColors.primary : AppColors.textDark)),
+              ]),
+            ),
+          ),
+        );
+        LabelSpec currentSpec() => LabelSpec(
+          labelWmm: _barcodeLabelW, labelHmm: _barcodeLabelH, columns: _barcodePerRow, gapMm: 2.0);
+        LabelPrinterProfile buildProfile() => profile.copyWith(
+          host: hostCtrl.text.trim(),
+          port: int.tryParse(portCtrl.text.trim()) ?? 9100,
+        );
+        return Dialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+          child: SizedBox(width: 440, child: Padding(
+            padding: const EdgeInsets.all(22),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                const Icon(Icons.settings_ethernet_rounded, size: 20, color: AppColors.primary),
+                const SizedBox(width: 10),
+                Text('Label Printer Setup', style: GoogleFonts.manrope(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.textDark)),
+                const Spacer(),
+                InkWell(onTap: () => Navigator.pop(ctx), borderRadius: BorderRadius.circular(7),
+                  child: Container(width: 26, height: 26, decoration: BoxDecoration(color: AppColors.surfaceVariant, borderRadius: BorderRadius.circular(7)),
+                    child: const Icon(Icons.close_rounded, size: 14, color: AppColors.textMuted))),
+              ]),
+              const SizedBox(height: 4),
+              Text('Network printers get pixel-perfect barcodes with no driver setup.',
+                  style: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted)),
+              const SizedBox(height: 16),
+              Row(children: [
+                modeChip('System (PDF)', Icons.picture_as_pdf_outlined, !isNetwork,
+                    () => setLocal(() => profile = profile.copyWith(transport: LabelTransport.pdf))),
+                const SizedBox(width: 10),
+                modeChip('Network (Raw)', Icons.lan_outlined, isNetwork,
+                    () => setLocal(() => profile = profile.copyWith(transport: LabelTransport.network))),
+              ]),
+              if (isNetwork) ...[
+                const SizedBox(height: 16),
+                Text('PRINTER IP ADDRESS', style: _fieldMiniLabel()),
+                const SizedBox(height: 6),
+                TextField(controller: hostCtrl, style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark), decoration: dec('192.168.1.50')),
+                const SizedBox(height: 12),
+                Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  SizedBox(width: 90, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('PORT', style: _fieldMiniLabel()), const SizedBox(height: 6),
+                    TextField(controller: portCtrl, keyboardType: TextInputType.number, style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark), decoration: dec('9100')),
+                  ])),
+                  const SizedBox(width: 12),
+                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('LANGUAGE', style: _fieldMiniLabel()), const SizedBox(height: 6),
+                    Container(
+                      height: 42, padding: const EdgeInsets.symmetric(horizontal: 10),
+                      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(9), border: Border.all(color: AppColors.border)),
+                      child: DropdownButtonHideUnderline(child: DropdownButton<LabelLanguage>(
+                        value: profile.language, isExpanded: true, isDense: true,
+                        icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 16, color: AppColors.textMuted),
+                        items: LabelLanguage.values.map((l) => DropdownMenuItem(value: l,
+                          child: Text(l.label, style: GoogleFonts.inter(fontSize: 12, color: AppColors.textDark), overflow: TextOverflow.ellipsis))).toList(),
+                        onChanged: (v) => setLocal(() => profile = profile.copyWith(language: v)),
+                      )),
+                    ),
+                  ])),
+                  const SizedBox(width: 12),
+                  SizedBox(width: 80, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('DPI', style: _fieldMiniLabel()), const SizedBox(height: 6),
+                    Container(
+                      height: 42, padding: const EdgeInsets.symmetric(horizontal: 10),
+                      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(9), border: Border.all(color: AppColors.border)),
+                      child: DropdownButtonHideUnderline(child: DropdownButton<int>(
+                        value: profile.dpi, isExpanded: true, isDense: true,
+                        icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 16, color: AppColors.textMuted),
+                        items: const [203, 300].map((d) => DropdownMenuItem(value: d,
+                          child: Text('$d', style: GoogleFonts.inter(fontSize: 12, color: AppColors.textDark)))).toList(),
+                        onChanged: (v) => setLocal(() => profile = profile.copyWith(dpi: v)),
+                      )),
+                    ),
+                  ])),
+                ]),
+                const SizedBox(height: 14),
+                Container(
+                  padding: const EdgeInsets.all(11),
+                  decoration: BoxDecoration(color: const Color(0xFFF0F4FF), borderRadius: BorderRadius.circular(9)),
+                  child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const Icon(Icons.info_outline_rounded, size: 15, color: AppColors.primary),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text('Uses the label Size (${_barcodeLabelW.toStringAsFixed(0)}×${_barcodeLabelH.toStringAsFixed(0)}mm) and Per Row ($_barcodePerRow) from the Print Barcodes screen. Give the printer a fixed IP on your router.',
+                        style: GoogleFonts.inter(fontSize: 11.5, color: AppColors.primary, height: 1.4))),
+                  ]),
+                ),
+                const SizedBox(height: 14),
+                SizedBox(width: double.infinity, child: OutlinedButton.icon(
+                  onPressed: () async {
+                    final p = buildProfile();
+                    if (p.host.isEmpty) { _showToast('Enter the printer IP first', isError: true); return; }
+                    try {
+                      await LabelPrinterService.printTestLabel(currentSpec(), p);
+                      if (mounted) _showToast('Test label sent to ${p.host}');
+                    } catch (e) {
+                      if (mounted) _showToast('Could not reach printer: $e', isError: true);
+                    }
+                  },
+                  icon: const Icon(Icons.science_outlined, size: 16),
+                  label: Text('Print Test Label', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600)),
+                  style: OutlinedButton.styleFrom(foregroundColor: AppColors.primary, side: const BorderSide(color: AppColors.primary),
+                    padding: const EdgeInsets.symmetric(vertical: 12), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+                )),
+              ],
+              const SizedBox(height: 18),
+              Row(children: [
+                Expanded(child: OutlinedButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 12), side: const BorderSide(color: AppColors.border),
+                    foregroundColor: AppColors.textMuted, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+                  child: Text('Cancel', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w500)))),
+                const SizedBox(width: 10),
+                Expanded(child: ElevatedButton(
+                  onPressed: () async {
+                    await LabelPrinterService.save(buildProfile());
+                    if (!ctx.mounted) return;
+                    Navigator.pop(ctx);
+                    _showToast('Label printer saved');
+                  },
+                  style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: Colors.white, elevation: 0,
+                    padding: const EdgeInsets.symmetric(vertical: 12), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+                  child: Text('Save', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700)))),
+              ]),
+            ]),
+          )),
+        );
+      }),
+    );
+  }
+
+  TextStyle _fieldMiniLabel() => GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: AppColors.textMuted, letterSpacing: 0.6);
+
   void _showBulkPrintDialog() {
     final labelWCtrl  = TextEditingController(text: _barcodeLabelW.toStringAsFixed(_barcodeLabelW == _barcodeLabelW.truncateToDouble() ? 0 : 1));
     final labelHCtrl  = TextEditingController(text: _barcodeLabelH.toStringAsFixed(_barcodeLabelH == _barcodeLabelH.truncateToDouble() ? 0 : 1));
@@ -6398,7 +6566,26 @@ end tell
             }).toList();
         final total = _products.where((p) => selected[p.id] == true).fold<int>(0, (s, p) => s + (qtys[p.id] ?? 0));
 
-        return Dialog(
+        Future<void> doPrint() async {
+          if (!(total > 0 && printer != 'System Default' && printerOnline[printer] != false)) return;
+          final w = double.tryParse(labelWCtrl.text) ?? _barcodeLabelW;
+          final h = double.tryParse(labelHCtrl.text) ?? _barcodeLabelH;
+          final perRow = int.tryParse(perRowCtrl.text) ?? _barcodePerRow;
+          Navigator.pop(ctx);
+          setState(() { _barcodeLabelW = w; _barcodeLabelH = h; _barcodePerRow = perRow; _barcodePrinter = printer; });
+          LocalDbService.saveSettings({'barcode_label_w': w.toString(), 'barcode_label_h': h.toString(), 'barcode_per_row': perRow.toString(), 'barcode_printer': printer});
+          final selProducts = _products.where((p) => selected[p.id] == true).toList();
+          await _printAllBarcodesWithQty(selProducts, qtys, labelW: w, labelH: h, labelsPerRow: perRow, printerName: printer);
+        }
+
+        return CallbackShortcuts(
+          bindings: {
+            const SingleActivator(LogicalKeyboardKey.enter): doPrint,
+            const SingleActivator(LogicalKeyboardKey.numpadEnter): doPrint,
+          },
+          child: Focus(
+          autofocus: true,
+          child: Dialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
           elevation: 0,
           insetPadding: const EdgeInsets.symmetric(horizontal: 60, vertical: 40),
@@ -6465,6 +6652,24 @@ end tell
                     onChanged: (v) => setLocal(() => printer = v ?? 'System Default'),
                     style: GoogleFonts.inter(fontSize: 12, color: AppColors.textDark),
                   ))),
+                  const SizedBox(width: 6),
+                  Tooltip(
+                    message: 'Network label printer setup',
+                    child: InkWell(
+                      onTap: () async { await _showLabelPrinterSetup(); setLocal(() {}); },
+                      borderRadius: BorderRadius.circular(7),
+                      child: Container(
+                        width: 30, height: 30,
+                        decoration: BoxDecoration(
+                          color: LabelPrinterService.cached.isNetwork ? AppColors.primary.withValues(alpha: 0.1) : Colors.white,
+                          borderRadius: BorderRadius.circular(7),
+                          border: Border.all(color: LabelPrinterService.cached.isNetwork ? AppColors.primary : AppColors.border),
+                        ),
+                        child: Icon(Icons.settings_ethernet_rounded, size: 15,
+                            color: LabelPrinterService.cached.isNetwork ? AppColors.primary : AppColors.textMuted),
+                      ),
+                    ),
+                  ),
                 ]),
               ),
               // ── Search bar ──
@@ -6653,16 +6858,7 @@ end tell
                   ),
                   const SizedBox(width: 10),
                   ElevatedButton.icon(
-                    onPressed: !canPrint ? null : () async {
-                      final w = double.tryParse(labelWCtrl.text) ?? _barcodeLabelW;
-                      final h = double.tryParse(labelHCtrl.text) ?? _barcodeLabelH;
-                      final perRow = int.tryParse(perRowCtrl.text) ?? _barcodePerRow;
-                      Navigator.pop(ctx);
-                      setState(() { _barcodeLabelW = w; _barcodeLabelH = h; _barcodePerRow = perRow; _barcodePrinter = printer; });
-                      LocalDbService.saveSettings({'barcode_label_w': w.toString(), 'barcode_label_h': h.toString(), 'barcode_per_row': perRow.toString(), 'barcode_printer': printer});
-                      final selProducts = _products.where((p) => selected[p.id] == true).toList();
-                      await _printAllBarcodesWithQty(selProducts, qtys, labelW: w, labelH: h, labelsPerRow: perRow, printerName: printer);
-                    },
+                    onPressed: !canPrint ? null : doPrint,
                     icon: const Icon(Icons.print_rounded, size: 15),
                     label: Text('Print $total Label${total != 1 ? 's' : ''}',
                         style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600)),
@@ -6676,6 +6872,8 @@ end tell
               );
               }),
             ]),
+          ),
+          ),
           ),
         );
       }),
@@ -6701,15 +6899,39 @@ end tell
       {double labelW = 58, double labelH = 30, int labelsPerRow = 1, String? printerName}) async {
     if (products.isEmpty) return;
 
+    // Raw path: if a network label printer is configured, send TSPL/ZPL straight
+    // to it over TCP:9100 — pixel-perfect, no driver, no preview needed.
+    final profile = LabelPrinterService.cached;
+    if (profile.isNetwork) {
+      final items = <LabelItem>[
+        for (final p in products)
+          LabelItem(
+            barcodeValue: p.barcodeNo.isNotEmpty ? p.barcodeNo : p.sku,
+            name: p.name,
+            price: '$_currencySymbol${p.price.toStringAsFixed(2)}',
+            count: qtys[p.id] ?? 1,
+          ),
+      ];
+      final spec = LabelSpec(labelWmm: labelW, labelHmm: labelH, columns: labelsPerRow, gapMm: 2.0);
+      try {
+        await LabelPrinterService.printBatch(items, spec, profile);
+        if (mounted) _showToast('Sent to ${profile.host}');
+      } catch (e) {
+        if (mounted) _showToast('Printer ${profile.host} unreachable: $e', isError: true);
+      }
+      return;
+    }
+
     final regularData = await rootBundle.load('assets/fonts/NotoSans-Regular.ttf');
     final boldData    = await rootBundle.load('assets/fonts/NotoSans-Bold.ttf');
     final regular = pw.Font.ttf(regularData);
     final bold    = pw.Font.ttf(boldData);
 
     final doc = pw.Document();
-    // labelW x labelH = ONE sticker; page = perRow stickers + gaps + side margins
-    const gapMm = 0.5;
-    const marginMm = 2.0;
+    // labelW x labelH = ONE sticker; page = perRow stickers, edge-to-edge so the
+    // page width equals the physical liner width (e.g. 3 × 35mm = 105mm exactly).
+    const gapMm = 0.0;
+    const marginMm = 0.0;
     final gap = gapMm * PdfPageFormat.mm;
     final margin = marginMm * PdfPageFormat.mm;
     final cellW = labelW * PdfPageFormat.mm;
@@ -6825,26 +7047,14 @@ end tell
                       return;
                     }
                     Navigator.pop(ctx);
-                    final tmp = await Directory.systemTemp.createTemp('billcat_bulk_');
-                    final pdfFile = File('${tmp.path}/Barcodes.pdf');
-                    await pdfFile.writeAsBytes(bytes);
                     final sheetW = marginMm * 2 + labelsPerRow * labelW + (labelsPerRow - 1) * gapMm;
                     final sheetH = labelH;
-                    final wPt = (sheetW / 25.4 * 72).round();
-                    final hPt = (sheetH / 25.4 * 72).round();
-                    final lprArgs = [
-                      if (targetPrinter != null) ...[ '-P', targetPrinter],
-                      '-o', 'fit-to-page=false',
-                      '-o', 'media=Custom.${wPt}x$hPt',
-                      '-o', 'scaling=100',
-                      pdfFile.path,
-                    ];
-                    final result = await Process.run('/usr/bin/lpr',lprArgs);
-                    if (result.exitCode != 0 && mounted) {
-                      _showToast('Print failed: ${result.stderr}', isError: true);
-                    } else if (mounted) {
-                      _showToast('Sent to ${targetPrinter ?? 'default printer'}');
-                    }
+                    await _printPdfBytes(
+                      bytes: bytes,
+                      printerName: targetPrinter,
+                      widthPt: sheetW / 25.4 * 72,
+                      heightPt: sheetH / 25.4 * 72,
+                    );
                   },
                   icon: const Icon(Icons.print_rounded, size: 15),
                   label: Text('Print', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600)),
@@ -7546,9 +7756,10 @@ end tell
     final bold    = pw.Font.ttf(boldData);
 
     final doc = pw.Document();
-    // labelW x labelH = ONE sticker; page = perRow stickers + gaps + side margins
-    const gapMm = 0.5;
-    const marginMm = 2.0;
+    // labelW x labelH = ONE sticker; page = perRow stickers, edge-to-edge so the
+    // page width equals the physical liner width (e.g. 3 × 35mm = 105mm exactly).
+    const gapMm = 0.0;
+    const marginMm = 0.0;
     final gap = gapMm * PdfPageFormat.mm;
     final margin = marginMm * PdfPageFormat.mm;
     final cellW = labelW * PdfPageFormat.mm;
@@ -7648,31 +7859,23 @@ end tell
                 const SizedBox(width: 10),
                 Expanded(child: ElevatedButton.icon(
                   onPressed: () async {
+                    final targetPrinter = (printerName != null && printerName != 'System Default') ? printerName : null;
+                    if (targetPrinter == null) {
+                      _showToast('Select a connected printer — default printing is disabled.', isError: true);
+                      return;
+                    }
                     Navigator.pop(ctx);
-                    final tmp = await Directory.systemTemp.createTemp('billcat_barcode_');
-                    final pdfFile = File('${tmp.path}/Barcode-${p.sku}.pdf');
-                    await pdfFile.writeAsBytes(bytes);
                     // Sheet dimensions: side margins + perRow stickers + gaps
                     const gapMm = 0.5;
                     const marginMm = 2.0;
                     final sheetW = marginMm * 2 + labelsPerRow * labelW + (labelsPerRow - 1) * gapMm;
                     final sheetH = labelH;
-                    final targetPrinter = (printerName != null && printerName != 'System Default') ? printerName : null;
-                    final wPt = (sheetW / 25.4 * 72).round();
-                    final hPt = (sheetH / 25.4 * 72).round();
-                    final lprArgs2 = [
-                      if (targetPrinter != null) ...[ '-P', targetPrinter],
-                      '-o', 'fit-to-page=false',
-                      '-o', 'media=Custom.${wPt}x$hPt',
-                      '-o', 'scaling=100',
-                      pdfFile.path,
-                    ];
-                    final result2 = await Process.run('/usr/bin/lpr',lprArgs2);
-                    if (result2.exitCode != 0 && mounted) {
-                      _showToast('Print failed: ${result2.stderr}', isError: true);
-                    } else if (mounted) {
-                      _showToast('Sent to ${targetPrinter ?? 'default printer'}');
-                    }
+                    await _printPdfBytes(
+                      bytes: bytes,
+                      printerName: targetPrinter,
+                      widthPt: sheetW / 25.4 * 72,
+                      heightPt: sheetH / 25.4 * 72,
+                    );
                   },
                   icon: const Icon(Icons.print_rounded, size: 15),
                   label: Text('Print', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600)),
@@ -7763,25 +7966,61 @@ end tell
     }
 
     final bytes = await doc.save();
-    final tmp = await Directory.systemTemp.createTemp('billcat_barcodes_');
-    final pdfFile = File('${tmp.path}/Barcodes.pdf');
-    await pdfFile.writeAsBytes(bytes);
     final targetPrinter3 = (_barcodePrinter != 'System Default') ? _barcodePrinter : null;
+    if (targetPrinter3 == null) {
+      if (mounted) _showToast('Select a connected printer — default printing is disabled.', isError: true);
+      return;
+    }
     final sheetW3 = 2.0 * 2 + _barcodePerRow * _barcodeLabelW + (_barcodePerRow - 1) * 0.5;
     final sheetH3 = _barcodeLabelH;
-    final wPt3 = (sheetW3 / 25.4 * 72).round();
-    final hPt3 = (sheetH3 / 25.4 * 72).round();
-    final result3 = await Process.run('/usr/bin/lpr',[
-      if (targetPrinter3 != null) ...[ '-P', targetPrinter3],
-      '-o', 'fit-to-page=false',
-      '-o', 'media=Custom.${wPt3}x$hPt3',
-      '-o', 'scaling=100',
-      pdfFile.path,
-    ]);
-    if (result3.exitCode != 0 && mounted) {
-      _showToast('Print failed: ${result3.stderr}', isError: true);
-    } else if (mounted) {
-      _showToast('Sent to ${targetPrinter3 ?? 'default printer'}');
+    await _printPdfBytes(
+      bytes: bytes,
+      printerName: targetPrinter3,
+      widthPt: sheetW3 / 25.4 * 72,
+      heightPt: sheetH3 / 25.4 * 72,
+    );
+  }
+
+  /// Prints already-rendered PDF [bytes] to a named printer using the OS print
+  /// system (CUPS on macOS / Windows spooler) via the printing package — avoids
+  /// shelling out to `lpr`, which fails inside restricted app environments.
+  Future<void> _printPdfBytes({
+    required Uint8List bytes,
+    required String printerName,
+    Printer? printerObj,
+    double? widthPt,
+    double? heightPt,
+    String jobName = 'BillCat Labels',
+  }) async {
+    try {
+      Printer? target = printerObj;
+      if (target == null) {
+        final list = await Printing.listPrinters();
+        for (final p in list) {
+          if (p.name == printerName) { target = p; break; }
+        }
+      }
+      if (target == null) {
+        if (mounted) _showToast('Printer "$printerName" not found', isError: true);
+        return;
+      }
+      final fmt = (widthPt != null && heightPt != null && widthPt > 0 && heightPt > 0)
+          ? PdfPageFormat(widthPt, heightPt)
+          : PdfPageFormat.a4;
+      // usePrinterSettings:false so the printer honours the app-computed page
+      // size (perRow × labelW) instead of forcing its own single-label media —
+      // this lets multi-across label sheets lay out correctly.
+      final ok = await Printing.directPrintPdf(
+        printer: target,
+        onLayout: (_) async => bytes,
+        name: jobName,
+        format: fmt,
+        usePrinterSettings: false,
+      );
+      if (!mounted) return;
+      _showToast(ok ? 'Sent to $printerName' : 'Print was cancelled', isError: !ok);
+    } catch (e) {
+      if (mounted) _showToast('Print failed: $e', isError: true);
     }
   }
 
@@ -7940,14 +8179,19 @@ end tell
     required TextEditingController supplierCtrl,
     required DateTime? purchaseDate,
     required void Function(DateTime?) onPickDate,
+    FocusNode? supplierFocus,
+    VoidCallback? onSupplierSubmitted,
   }) {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       _dlgLabel('DEALER / SUPPLIER'),
       const SizedBox(height: 6),
       Builder(builder: (fctx) => TextFormField(
         controller: supplierCtrl,
+        focusNode: supplierFocus,
         textInputAction: TextInputAction.next,
-        onFieldSubmitted: (_) => FocusScope.of(fctx).nextFocus(),
+        onFieldSubmitted: (_) => onSupplierSubmitted != null
+            ? onSupplierSubmitted()
+            : FocusScope.of(fctx).nextFocus(),
         style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
         decoration: _dlgInputDecor('e.g. Metro Wholesale'),
       )),
@@ -8454,10 +8698,19 @@ end tell
     String unit = 'pcs';
     String barcodeNo = '';
     final supplierCtrl = TextEditingController();
-    DateTime? purchaseDate;
+    DateTime? purchaseDate = DateTime.now();
     bool skuAutoMode = true;
     final variantDrafts = <_VariantDraft>[];
     int selVar = -1; // -1 = base product; else index into variantDrafts
+    // Explicit focus chain so Enter walks only the text fields (skips dropdowns,
+    // the date picker and the action buttons).
+    final nameFocus = FocusNode();
+    final skuFocus = FocusNode();
+    final supplierFocus = FocusNode();
+    final priceFocus = FocusNode();
+    final stockFocus = FocusNode();
+    final buyingFocus = FocusNode();
+    final taxFocus = FocusNode();
     LocalDbService.getNextBarcodeNo().then((n) { barcodeNo = n; });
 
     nameCtrl.addListener(() {
@@ -8478,6 +8731,46 @@ end tell
         final priceController = activeVar?.price ?? priceCtrl;
         final stockController = activeVar?.stock ?? stockCtrl;
         final skuController = activeVar?.sku ?? skuCtrl;
+        Future<void> submitProduct() async {
+          if (!formKey.currentState!.validate()) return;
+          final sku = skuCtrl.text.trim().isEmpty
+              ? _generateUniqueSku(nameCtrl.text.trim())
+              : skuCtrl.text.trim().toUpperCase();
+          if (_products.any((p) => p.sku == sku)) {
+            _showToast('SKU "$sku" already exists', isError: true);
+            return;
+          }
+          final basePrice = double.tryParse(priceCtrl.text) ?? 0;
+          final variants = _buildVariantsFromDrafts(variantDrafts, sku, basePrice);
+          final effectiveStock = variants.isNotEmpty
+              ? variants.fold<int>(0, (s, v) => s + v.stock)
+              : (int.tryParse(stockCtrl.text) ?? 0);
+          final newProduct = Product(
+            id: DateTime.now().millisecondsSinceEpoch.toString(),
+            name: nameCtrl.text.trim(),
+            price: basePrice,
+            buyingPrice: double.tryParse(buyingPriceCtrl.text) ?? 0.0,
+            taxPercent: double.tryParse(taxPercentCtrl.text) ?? 0.0,
+            category: category,
+            emoji: emoji,
+            sku: sku,
+            stock: effectiveStock,
+            description: tags.join(', '),
+            unit: unit,
+            barcodeNo: barcodeNo.isEmpty
+                ? await LocalDbService.getNextBarcodeNo()
+                : barcodeNo,
+            supplier: supplierCtrl.text.trim(),
+            purchaseDate: purchaseDate,
+            variants: variants,
+          );
+          await LocalDbService.insertProduct(newProduct);
+          ConnectivityService.instance.syncNow();
+          if (!ctx.mounted) return;
+          setState(() => _products.add(newProduct));
+          Navigator.pop(ctx);
+          _showToast('${newProduct.name} added to inventory');
+        }
         return Dialog(
           backgroundColor: Colors.white,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -8522,7 +8815,8 @@ end tell
                   ),
                 ),
                 // Form
-                Padding(
+                Flexible(
+                  child: SingleChildScrollView(
                   padding: const EdgeInsets.all(28),
                   child: Form(
                     key: formKey,
@@ -8588,8 +8882,9 @@ end tell
                                       const SizedBox(height: 6),
                                       TextFormField(
                                         controller: nameCtrl,
+                                        focusNode: nameFocus,
                                         textInputAction: TextInputAction.next,
-                                        onFieldSubmitted: (_) => FocusScope.of(ctx).nextFocus(),
+                                        onFieldSubmitted: (_) => skuFocus.requestFocus(),
                                         validator: (v) =>
                                             v != null && v.trim().isNotEmpty ? null : 'Required',
                                         style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
@@ -8622,8 +8917,9 @@ end tell
                                   const SizedBox(height: 6),
                                   TextFormField(
                                     controller: skuController,
+                                    focusNode: skuFocus,
                                     textInputAction: TextInputAction.next,
-                                    onFieldSubmitted: (_) => FocusScope.of(ctx).nextFocus(),
+                                    onFieldSubmitted: (_) => supplierFocus.requestFocus(),
                                     style: GoogleFonts.inter(
                                         fontSize: 13,
                                         color: AppColors.textDark),
@@ -8688,6 +8984,8 @@ end tell
                           supplierCtrl: supplierCtrl,
                           purchaseDate: purchaseDate,
                           onPickDate: (d) => setLocal(() => purchaseDate = d),
+                          supplierFocus: supplierFocus,
+                          onSupplierSubmitted: () => priceFocus.requestFocus(),
                         ),
                         const SizedBox(height: 16),
                         // Price + Stock row
@@ -8701,8 +8999,9 @@ end tell
                                   const SizedBox(height: 6),
                                   TextFormField(
                                     controller: priceController,
+                                    focusNode: priceFocus,
                                     textInputAction: TextInputAction.next,
-                                    onFieldSubmitted: (_) => FocusScope.of(ctx).nextFocus(),
+                                    onFieldSubmitted: (_) => stockFocus.requestFocus(),
                                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                                     inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
                                     validator: (v) {
@@ -8726,8 +9025,9 @@ end tell
                                   const SizedBox(height: 6),
                                   TextFormField(
                                     controller: stockController,
+                                    focusNode: stockFocus,
                                     textInputAction: TextInputAction.next,
-                                    onFieldSubmitted: (_) => FocusScope.of(ctx).nextFocus(),
+                                    onFieldSubmitted: (_) => buyingFocus.requestFocus(),
                                     enabled: activeVar != null || variantDrafts.isEmpty,
                                     keyboardType: TextInputType.number,
                                     inputFormatters: [FilteringTextInputFormatter.digitsOnly],
@@ -8758,8 +9058,9 @@ end tell
                                   const SizedBox(height: 6),
                                   TextFormField(
                                     controller: buyingPriceCtrl,
+                                    focusNode: buyingFocus,
                                     textInputAction: TextInputAction.next,
-                                    onFieldSubmitted: (_) => FocusScope.of(ctx).nextFocus(),
+                                    onFieldSubmitted: (_) => taxFocus.requestFocus(),
                                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                                     inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
                                     style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
@@ -8777,7 +9078,9 @@ end tell
                                   const SizedBox(height: 6),
                                   TextFormField(
                                     controller: taxPercentCtrl,
+                                    focusNode: taxFocus,
                                     textInputAction: TextInputAction.done,
+                                    onFieldSubmitted: (_) => submitProduct(),
                                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                                     inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}'))],
                                     style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark),
@@ -8876,6 +9179,7 @@ end tell
                       ],
                     ),
                   ),
+                  ),
                 ),
                 // Actions
                 Container(
@@ -8897,48 +9201,7 @@ end tell
                       ),
                       const SizedBox(width: 12),
                       ElevatedButton(
-                        onPressed: () async {
-                          if (!formKey.currentState!.validate()) return;
-                          final sku = skuCtrl.text.trim().isEmpty
-                              ? _generateUniqueSku(nameCtrl.text.trim())
-                              : skuCtrl.text.trim().toUpperCase();
-                          if (_products.any((p) => p.sku == sku)) {
-                            _showToast('SKU "$sku" already exists', isError: true);
-                            return;
-                          }
-                          final basePrice = double.tryParse(priceCtrl.text) ?? 0;
-                          final variants = _buildVariantsFromDrafts(variantDrafts, sku, basePrice);
-                          final effectiveStock = variants.isNotEmpty
-                              ? variants.fold<int>(0, (s, v) => s + v.stock)
-                              : (int.tryParse(stockCtrl.text) ?? 0);
-                          final newProduct = Product(
-                            id: DateTime.now()
-                                .millisecondsSinceEpoch
-                                .toString(),
-                            name: nameCtrl.text.trim(),
-                            price: basePrice,
-                            buyingPrice: double.tryParse(buyingPriceCtrl.text) ?? 0.0,
-                            taxPercent: double.tryParse(taxPercentCtrl.text) ?? 0.0,
-                            category: category,
-                            emoji: emoji,
-                            sku: sku,
-                            stock: effectiveStock,
-                            description: tags.join(', '),
-                            unit: unit,
-                            barcodeNo: barcodeNo.isEmpty
-                              ? await LocalDbService.getNextBarcodeNo()
-                              : barcodeNo,
-                            supplier: supplierCtrl.text.trim(),
-                            purchaseDate: purchaseDate,
-                            variants: variants,
-                          );
-                          await LocalDbService.insertProduct(newProduct);
-                          ConnectivityService.instance.syncNow();
-                          if (!ctx.mounted) return;
-                          setState(() => _products.add(newProduct));
-                          Navigator.pop(ctx);
-                          _showToast('${newProduct.name} added to inventory');
-                        },
+                        onPressed: submitProduct,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: AppColors.primary,
                           foregroundColor: Colors.white,
@@ -9067,6 +9330,18 @@ end tell
   // Hardware keyboard handler — pure-digit sequences go silently to cart
   bool _handleHardwareKey(KeyEvent event) {
     if (event is! KeyDownEvent || !mounted) return false;
+    // Cmd/Ctrl+P on the Inventory tab → open the Print Barcodes dialog
+    if (event.logicalKey == LogicalKeyboardKey.keyP &&
+        (HardwareKeyboard.instance.isMetaPressed || HardwareKeyboard.instance.isControlPressed)) {
+      if (_selectedTab == 2 && ModalRoute.of(context)?.isCurrent != false) {
+        _bulkPrintQtys = { for (final p in _products) p.id: p.stock > 0 ? p.stock : 1 };
+        _bulkPrintSelected = {};
+        _bulkPrinters = ['System Default'];
+        _showBulkPrintDialog();
+        return true;
+      }
+      return false;
+    }
     // Only on billing tab (tab 1), not inside a dialog
     if (_selectedTab != 1) return false;
     final isDialogOpen = ModalRoute.of(context)?.isCurrent == false;
