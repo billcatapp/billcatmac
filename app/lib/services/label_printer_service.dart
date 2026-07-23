@@ -142,6 +142,33 @@ class LabelPrinterService {
     } catch (_) {}
   }
 
+  // ── Device-local barcode settings (printer name, label size, per-row) ──────
+  // Kept out of the synced cloud settings so each machine remembers its OWN
+  // printer/label stock without clashing with other devices on the account.
+  static Future<File> _barcodeFile() async =>
+      File('${await _configDir()}/barcode_settings.json');
+
+  static Map<String, dynamic> _barcode = {};
+  static Map<String, dynamic> get barcodeSettings => _barcode;
+
+  static Future<Map<String, dynamic>> loadBarcodeSettings() async {
+    try {
+      final f = await _barcodeFile();
+      if (await f.exists()) {
+        _barcode = (jsonDecode(await f.readAsString()) as Map).cast<String, dynamic>();
+      }
+    } catch (_) {}
+    return _barcode;
+  }
+
+  static Future<void> saveBarcodeSettings(Map<String, dynamic> patch) async {
+    _barcode = {..._barcode, ...patch};
+    try {
+      final f = await _barcodeFile();
+      await f.writeAsString(jsonEncode(_barcode));
+    } catch (_) {}
+  }
+
   // ── Command generation ──────────────────────────────────────────────────
   static int _dots(double mm, int dpi) => (mm * dpi / 25.4).round();
 

@@ -350,7 +350,23 @@ class _BillingScreenState extends State<BillingScreen> {
     _loadCurrentVersion();
     ReceiptPrinter.preWarm();
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncTaxRate());
-    // Search bar no longer auto-steals focus — user must click it explicitly
+    // Keep the scan/search bar focused when idle so a barcode scanner works
+    // without clicking, and focus returns to it after each add.
+    _searchFocus.addListener(_keepSearchFocusedWhenIdle);
+  }
+
+  void _keepSearchFocusedWhenIdle() {
+    if (_searchFocus.hasFocus) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_selectedTab != 1 || _showSettings) return;          // only idle Billing screen
+      if (ModalRoute.of(context)?.isCurrent == false) return;  // a dialog is open
+      final pf = FocusManager.instance.primaryFocus;
+      // Only reclaim focus if nothing meaningful grabbed it (e.g. tapped empty
+      // space). Never steal from customer name/phone, discount, qty edits, etc.
+      final somethingElseFocused = pf != null && pf.hasPrimaryFocus && pf != _searchFocus;
+      if (!somethingElseFocused) _searchFocus.requestFocus();
+    });
   }
 
   // Removes corrupted BillCat-specific CUPS options written by older app versions.
@@ -375,7 +391,7 @@ class _BillingScreenState extends State<BillingScreen> {
   Future<void> _loadSettingsFromStorage() async {
     LabelPrinterService.load(); // device-local label-printer profile (not synced)
     final s = await LocalDbService.getSettings();
-    if (s.isEmpty || !mounted) return;
+    if (!mounted) return;
     setState(() {
       _storeName = s['store_name'] ?? _storeName;
       _storeAddress = s['store_address'] ?? _storeAddress;
@@ -390,10 +406,11 @@ class _BillingScreenState extends State<BillingScreen> {
       _dialCode = s['dial_code'] ?? _dialCode;
       _paperSize = s['paper_size'] ?? _paperSize;
       _selectedPrinter = s['selected_printer'] ?? _selectedPrinter;
+      // Label size falls back to the (legacy) synced value for migration; the
+      // printer NAME is device-local only — never inherited from another device.
       _barcodeLabelW = double.tryParse(s['barcode_label_w'] ?? '') ?? _barcodeLabelW;
       _barcodeLabelH = double.tryParse(s['barcode_label_h'] ?? '') ?? _barcodeLabelH;
       _barcodePerRow = int.tryParse(s['barcode_per_row'] ?? '') ?? _barcodePerRow;
-      _barcodePrinter = s['barcode_printer'] ?? _barcodePrinter;
       _printOrientation = s['print_orientation'] ?? _printOrientation;
       final savedLayout = s['invoice_layout'] ?? _invoiceLayout;
       const _validLayouts = ['Classic','Simple','Modern','GST','Landscape','Theme 1','Theme 2','Theme 3','Theme 4','Theme 5'];
@@ -414,6 +431,17 @@ class _BillingScreenState extends State<BillingScreen> {
       _editWaPhoneNumberId = _waPhoneNumberId;
       _editWaAccessToken = _waAccessToken;
     });
+    // Device-local barcode config (printer name + label size) — overrides the
+    // synced values so each machine keeps its own printer without clashing.
+    final bc = await LabelPrinterService.loadBarcodeSettings();
+    if (mounted && bc.isNotEmpty) {
+      setState(() {
+        _barcodeLabelW = (bc['labelW'] as num?)?.toDouble() ?? _barcodeLabelW;
+        _barcodeLabelH = (bc['labelH'] as num?)?.toDouble() ?? _barcodeLabelH;
+        _barcodePerRow = (bc['perRow'] as num?)?.toInt() ?? _barcodePerRow;
+        _barcodePrinter = (bc['printer'] as String?) ?? _barcodePrinter;
+      });
+    }
     _syncTaxRate();
     _restoreActivePrinter();
     _refreshQueuedInvoiceNo();
@@ -1063,7 +1091,15 @@ class _BillingScreenState extends State<BillingScreen> {
     final selected = _selectedTab == index;
     return _NavHoverTab(
       selected: selected,
-      onTap: () => setState(() => _selectedTab = index),
+      onTap: () {
+        setState(() => _selectedTab = index);
+        // Returning to Billing → focus the scan bar so scanning works instantly.
+        if (index == 1) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && _selectedTab == 1 && !_showSettings) _searchFocus.requestFocus();
+          });
+        }
+      },
       label: label,
     );
   }
@@ -1194,7 +1230,7 @@ class _BillingScreenState extends State<BillingScreen> {
                     child: TextField(
                       controller: _searchController,
                       focusNode: _searchFocus,
-                      autofocus: false,
+                      autofocus: true,
                       onChanged: (v) {
                         setState(() => _searchQuery = v);
                         // Auto-add on exact barcode/SKU match (barcode scanner hit)
@@ -1226,7 +1262,7 @@ class _BillingScreenState extends State<BillingScreen> {
                           context.read<CartProvider>().addProduct(match);
                           setState(() { _searchQuery = ''; _searchController.clear(); });
                           _showToast('${match.name} added to cart');
-                          _searchFocus.unfocus();
+                          _searchFocus.requestFocus(); // keep focus for the next scan
                         } else {
                           _showToast('No product found for "$query"', isError: true);
                         }
@@ -6567,13 +6603,13 @@ end tell
         final total = _products.where((p) => selected[p.id] == true).fold<int>(0, (s, p) => s + (qtys[p.id] ?? 0));
 
         Future<void> doPrint() async {
-          if (!(total > 0 && printer != 'System Default' && printerOnline[printer] != false)) return;
+          if (!(total > 0 && printerOnline[printer] != false)) return;
           final w = double.tryParse(labelWCtrl.text) ?? _barcodeLabelW;
           final h = double.tryParse(labelHCtrl.text) ?? _barcodeLabelH;
           final perRow = int.tryParse(perRowCtrl.text) ?? _barcodePerRow;
           Navigator.pop(ctx);
           setState(() { _barcodeLabelW = w; _barcodeLabelH = h; _barcodePerRow = perRow; _barcodePrinter = printer; });
-          LocalDbService.saveSettings({'barcode_label_w': w.toString(), 'barcode_label_h': h.toString(), 'barcode_per_row': perRow.toString(), 'barcode_printer': printer});
+          LabelPrinterService.saveBarcodeSettings({'labelW': w, 'labelH': h, 'perRow': perRow, 'printer': printer});
           final selProducts = _products.where((p) => selected[p.id] == true).toList();
           await _printAllBarcodesWithQty(selProducts, qtys, labelW: w, labelH: h, labelsPerRow: perRow, printerName: printer);
         }
@@ -6830,20 +6866,20 @@ end tell
               Builder(builder: (_) {
               final isDefault = printer == 'System Default';
               final isOffline = printerOnline[printer] == false;
-              // Only print to a specific, connected printer. System Default and
-              // offline printers must never receive the job.
-              final canPrint = total > 0 && !isDefault && !isOffline;
+              // System Default falls back to the OS default printer; only block
+              // when there's nothing to print or the chosen printer is offline.
+              final canPrint = total > 0 && !isOffline;
               return Padding(
                 padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
                 child: Row(children: [
                   Flexible(child: Text(
-                      isDefault
-                          ? 'Select a connected printer to print'
-                          : isOffline
-                              ? '$printer is offline — connect it to print'
+                      isOffline
+                          ? '$printer is offline — connect it to print'
+                          : isDefault
+                              ? '$total label${total != 1 ? 's' : ''} → system default printer'
                               : '$total label${total != 1 ? 's' : ''} to print',
                       style: GoogleFonts.inter(fontSize: 12,
-                          color: (isDefault || isOffline) ? const Color(0xFFFF3B30) : AppColors.textMuted),
+                          color: isOffline ? const Color(0xFFFF3B30) : AppColors.textMuted),
                       overflow: TextOverflow.ellipsis)),
                   const Spacer(),
                   OutlinedButton(
@@ -7040,12 +7076,8 @@ end tell
                 const SizedBox(width: 10),
                 Expanded(child: ElevatedButton.icon(
                   onPressed: () async {
-                    final targetPrinter = (printerName != null && printerName != 'System Default') ? printerName : null;
-                    // Never fall back to the OS default printer — require a specific printer.
-                    if (targetPrinter == null) {
-                      _showToast('Select a connected printer — default printing is disabled.', isError: true);
-                      return;
-                    }
+                    // System Default resolves to the OS default printer in _printPdfBytes.
+                    final targetPrinter = printerName ?? 'System Default';
                     Navigator.pop(ctx);
                     final sheetW = marginMm * 2 + labelsPerRow * labelW + (labelsPerRow - 1) * gapMm;
                     final sheetH = labelH;
@@ -7712,11 +7744,8 @@ end tell
                         _barcodePerRow = finalPerRow;
                         _barcodePrinter = selectedDialogPrinter;
                       });
-                      LocalDbService.saveSettings({
-                        'barcode_label_w': w.toString(),
-                        'barcode_label_h': h.toString(),
-                        'barcode_per_row': finalPerRow.toString(),
-                        'barcode_printer': selectedDialogPrinter,
+                      LabelPrinterService.saveBarcodeSettings({
+                        'labelW': w, 'labelH': h, 'perRow': finalPerRow, 'printer': selectedDialogPrinter,
                       });
                       _printBarcode(p, quantity: finalQty, labelW: w, labelH: h, labelsPerRow: finalPerRow, printerName: selectedDialogPrinter);
                     },
@@ -7859,11 +7888,8 @@ end tell
                 const SizedBox(width: 10),
                 Expanded(child: ElevatedButton.icon(
                   onPressed: () async {
-                    final targetPrinter = (printerName != null && printerName != 'System Default') ? printerName : null;
-                    if (targetPrinter == null) {
-                      _showToast('Select a connected printer — default printing is disabled.', isError: true);
-                      return;
-                    }
+                    // System Default resolves to the OS default printer in _printPdfBytes.
+                    final targetPrinter = printerName ?? 'System Default';
                     Navigator.pop(ctx);
                     // Sheet dimensions: side margins + perRow stickers + gaps
                     const gapMm = 0.5;
@@ -7966,16 +7992,12 @@ end tell
     }
 
     final bytes = await doc.save();
-    final targetPrinter3 = (_barcodePrinter != 'System Default') ? _barcodePrinter : null;
-    if (targetPrinter3 == null) {
-      if (mounted) _showToast('Select a connected printer — default printing is disabled.', isError: true);
-      return;
-    }
+    // System Default resolves to the OS default printer in _printPdfBytes.
     final sheetW3 = 2.0 * 2 + _barcodePerRow * _barcodeLabelW + (_barcodePerRow - 1) * 0.5;
     final sheetH3 = _barcodeLabelH;
     await _printPdfBytes(
       bytes: bytes,
-      printerName: targetPrinter3,
+      printerName: _barcodePrinter,
       widthPt: sheetW3 / 25.4 * 72,
       heightPt: sheetH3 / 25.4 * 72,
     );
@@ -7996,26 +8018,36 @@ end tell
       Printer? target = printerObj;
       if (target == null) {
         final list = await Printing.listPrinters();
-        for (final p in list) {
-          if (p.name == printerName) { target = p; break; }
+        if (printerName.isEmpty || printerName == 'System Default') {
+          // Fall back to the OS default printer, or the only printer available.
+          for (final p in list) { if (p.isDefault) { target = p; break; } }
+          if (target == null && list.length == 1) target = list.first;
+        } else {
+          for (final p in list) { if (p.name == printerName) { target = p; break; } }
+          // Saved printer no longer on this machine → fall back to default.
+          if (target == null) {
+            for (final p in list) { if (p.isDefault) { target = p; break; } }
+          }
         }
       }
       if (target == null) {
-        if (mounted) _showToast('Printer "$printerName" not found', isError: true);
+        if (mounted) _showToast('No printer available — add one in System Settings', isError: true);
         return;
       }
       final fmt = (widthPt != null && heightPt != null && widthPt > 0 && heightPt > 0)
           ? PdfPageFormat(widthPt, heightPt)
           : PdfPageFormat.a4;
-      // usePrinterSettings:false so the printer honours the app-computed page
-      // size (perRow × labelW) instead of forcing its own single-label media —
-      // this lets multi-across label sheets lay out correctly.
+      // usePrinterSettings:true → the printer uses its OWN configured label
+      // media, which is what every driver reliably renders. Forcing a custom
+      // page size (false) makes many drivers accept the job but print nothing.
+      // Exact app-controlled sizing (multi-across) is handled by the raw
+      // TSPL/ZPL network path instead.
       final ok = await Printing.directPrintPdf(
         printer: target,
         onLayout: (_) async => bytes,
         name: jobName,
         format: fmt,
-        usePrinterSettings: false,
+        usePrinterSettings: true,
       );
       if (!mounted) return;
       _showToast(ok ? 'Sent to $printerName' : 'Print was cancelled', isError: !ok);
