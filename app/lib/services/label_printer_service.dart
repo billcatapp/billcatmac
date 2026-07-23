@@ -7,9 +7,10 @@ enum LabelLanguage { tspl, zpl }
 
 /// How labels are delivered to the printer.
 /// [pdf] uses the OS print system (the fallback path). [network] sends raw
-/// TSPL/ZPL bytes straight to the printer over TCP :9100 — no driver, no
-/// scaling, identical on macOS and Windows.
-enum LabelTransport { pdf, network }
+/// TSPL/ZPL bytes over TCP :9100. [usb] sends raw bytes to a USB printer via
+/// the CUPS queue with `lp -o raw`, which bypasses the (often wrong/missing)
+/// driver entirely — the reliable path for USB GODEX/TSC/TVS on macOS.
+enum LabelTransport { pdf, network, usb }
 
 extension LabelLanguageX on LabelLanguage {
   String get label => this == LabelLanguage.zpl ? 'ZPL (Zebra)' : 'TSPL (GODEX / TSC / TVS)';
@@ -27,6 +28,7 @@ class LabelPrinterProfile {
   final String host; // IP / hostname for network printers
   final int port; // raw port, almost always 9100
   final int dpi; // 203 (common) or 300
+  final String queue; // CUPS queue name for USB printers (e.g. GODEX_G500)
 
   const LabelPrinterProfile({
     this.transport = LabelTransport.pdf,
@@ -34,9 +36,12 @@ class LabelPrinterProfile {
     this.host = '',
     this.port = 9100,
     this.dpi = 203,
+    this.queue = '',
   });
 
   bool get isNetwork => transport == LabelTransport.network && host.trim().isNotEmpty;
+  bool get isUsb => transport == LabelTransport.usb && queue.trim().isNotEmpty;
+  bool get isRaw => isNetwork || isUsb;
 
   LabelPrinterProfile copyWith({
     LabelTransport? transport,
@@ -44,6 +49,7 @@ class LabelPrinterProfile {
     String? host,
     int? port,
     int? dpi,
+    String? queue,
   }) =>
       LabelPrinterProfile(
         transport: transport ?? this.transport,
@@ -51,22 +57,35 @@ class LabelPrinterProfile {
         host: host ?? this.host,
         port: port ?? this.port,
         dpi: dpi ?? this.dpi,
+        queue: queue ?? this.queue,
       );
 
+  static String _t(LabelTransport t) => switch (t) {
+        LabelTransport.network => 'network',
+        LabelTransport.usb => 'usb',
+        LabelTransport.pdf => 'pdf',
+      };
+
   Map<String, dynamic> toJson() => {
-        'transport': transport == LabelTransport.network ? 'network' : 'pdf',
+        'transport': _t(transport),
         'language': language.code,
         'host': host,
         'port': port,
         'dpi': dpi,
+        'queue': queue,
       };
 
   static LabelPrinterProfile fromJson(Map<String, dynamic> m) => LabelPrinterProfile(
-        transport: m['transport'] == 'network' ? LabelTransport.network : LabelTransport.pdf,
+        transport: switch (m['transport']) {
+          'network' => LabelTransport.network,
+          'usb' => LabelTransport.usb,
+          _ => LabelTransport.pdf,
+        },
         language: LabelLanguageX.fromCode(m['language'] as String?),
         host: (m['host'] as String?) ?? '',
         port: (m['port'] as num?)?.toInt() ?? 9100,
         dpi: (m['dpi'] as num?)?.toInt() ?? 203,
+        queue: (m['queue'] as String?) ?? '',
       );
 }
 
@@ -273,7 +292,7 @@ class LabelPrinterService {
   // ── Transport ───────────────────────────────────────────────────────────
   /// Sends raw bytes to a network printer over TCP. Throws on failure so the
   /// caller can surface the error and fall back to PDF.
-  static Future<void> sendRaw(String data, LabelPrinterProfile p) async {
+  static Future<void> sendRawNetwork(String data, LabelPrinterProfile p) async {
     final socket = await Socket.connect(
       p.host.trim(),
       p.port,
@@ -288,15 +307,46 @@ class LabelPrinterService {
     }
   }
 
-  /// Builds commands for [items] and sends them to the configured network
-  /// printer. Returns true on success. Only valid when [profile.isNetwork].
+  /// Sends raw bytes to a USB printer via its CUPS queue using `lp -o raw`,
+  /// which bypasses the queue's driver/PPD and delivers the bytes untouched.
+  static Future<void> sendRawUsb(String data, String queue) async {
+    final tmp = await Directory.systemTemp.createTemp('billcat_lbl_');
+    final f = File('${tmp.path}/label.prn');
+    await f.writeAsString(data, encoding: latin1, flush: true);
+    final res = await Process.run('/usr/bin/lp', ['-d', queue, '-o', 'raw', f.path]);
+    try { await tmp.delete(recursive: true); } catch (_) {}
+    if (res.exitCode != 0) {
+      throw Exception((res.stderr as String?)?.trim().isNotEmpty == true
+          ? (res.stderr as String).trim()
+          : 'lp exited with code ${res.exitCode}');
+    }
+  }
+
+  /// The CUPS queue names available on this machine (raw names, e.g. GODEX_G500).
+  static Future<List<String>> listQueues() async {
+    if (Platform.isWindows) return const [];
+    try {
+      final res = await Process.run('/usr/bin/lpstat', ['-e'])
+          .timeout(const Duration(seconds: 3));
+      return '${res.stdout}'.split('\n').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// Builds commands for [items] and sends them over the configured raw
+  /// transport (network or USB). Only valid when [profile.isRaw].
   static Future<void> printBatch(
     List<LabelItem> items,
     LabelSpec spec,
     LabelPrinterProfile profile,
   ) async {
     final data = buildCommands(items, spec, profile);
-    await sendRaw(data, profile);
+    if (profile.transport == LabelTransport.usb) {
+      await sendRawUsb(data, profile.queue.trim());
+    } else {
+      await sendRawNetwork(data, profile);
+    }
   }
 
   /// A single calibration label so users can confirm size/alignment.

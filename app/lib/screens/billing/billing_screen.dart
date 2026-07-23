@@ -6409,10 +6409,19 @@ end tell
     var profile = LabelPrinterService.cached;
     final hostCtrl = TextEditingController(text: profile.host);
     final portCtrl = TextEditingController(text: '${profile.port}');
+    var usbQueues = <String>[];
+    var queuesTried = false;
     return showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setLocal) {
         final isNetwork = profile.transport == LabelTransport.network;
+        final isUsb = profile.transport == LabelTransport.usb;
+        if (!queuesTried) {
+          queuesTried = true;
+          LabelPrinterService.listQueues().then((q) {
+            if (ctx.mounted) setLocal(() => usbQueues = q);
+          });
+        }
         InputDecoration dec(String hint) => InputDecoration(
           isDense: true, hintText: hint,
           hintStyle: GoogleFonts.inter(fontSize: 13, color: AppColors.textMuted),
@@ -6461,28 +6470,52 @@ end tell
                     child: const Icon(Icons.close_rounded, size: 14, color: AppColors.textMuted))),
               ]),
               const SizedBox(height: 4),
-              Text('Network printers get pixel-perfect barcodes with no driver setup.',
+              Text('Raw mode sends the printer its native language (TSPL/ZPL) — pixel-perfect, no driver needed. Best for GODEX/TSC/TVS.',
                   style: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted)),
               const SizedBox(height: 16),
               Row(children: [
-                modeChip('System (PDF)', Icons.picture_as_pdf_outlined, !isNetwork,
+                modeChip('System\n(PDF)', Icons.picture_as_pdf_outlined, !isNetwork && !isUsb,
                     () => setLocal(() => profile = profile.copyWith(transport: LabelTransport.pdf))),
-                const SizedBox(width: 10),
-                modeChip('Network (Raw)', Icons.lan_outlined, isNetwork,
+                const SizedBox(width: 8),
+                modeChip('USB\n(Raw)', Icons.usb_rounded, isUsb,
+                    () => setLocal(() => profile = profile.copyWith(transport: LabelTransport.usb))),
+                const SizedBox(width: 8),
+                modeChip('Network\n(Raw)', Icons.lan_outlined, isNetwork,
                     () => setLocal(() => profile = profile.copyWith(transport: LabelTransport.network))),
               ]),
-              if (isNetwork) ...[
+              if (isNetwork || isUsb) ...[
                 const SizedBox(height: 16),
-                Text('PRINTER IP ADDRESS', style: _fieldMiniLabel()),
-                const SizedBox(height: 6),
-                TextField(controller: hostCtrl, style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark), decoration: dec('192.168.1.50')),
+                if (isUsb) ...[
+                  Text('USB PRINTER', style: _fieldMiniLabel()),
+                  const SizedBox(height: 6),
+                  Container(
+                    height: 42, padding: const EdgeInsets.symmetric(horizontal: 12),
+                    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(9), border: Border.all(color: AppColors.border)),
+                    child: DropdownButtonHideUnderline(child: DropdownButton<String>(
+                      value: usbQueues.contains(profile.queue) ? profile.queue : null,
+                      isExpanded: true, isDense: true,
+                      hint: Text(usbQueues.isEmpty ? 'Loading printers…' : 'Select your label printer',
+                          style: GoogleFonts.inter(fontSize: 12, color: AppColors.textMuted)),
+                      icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 16, color: AppColors.textMuted),
+                      items: usbQueues.map((q) => DropdownMenuItem(value: q,
+                        child: Text(q.replaceAll('_', ' '), style: GoogleFonts.inter(fontSize: 12, color: AppColors.textDark), overflow: TextOverflow.ellipsis))).toList(),
+                      onChanged: (v) => setLocal(() => profile = profile.copyWith(queue: v)),
+                    )),
+                  ),
+                ] else ...[
+                  Text('PRINTER IP ADDRESS', style: _fieldMiniLabel()),
+                  const SizedBox(height: 6),
+                  TextField(controller: hostCtrl, style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark), decoration: dec('192.168.1.50')),
+                ],
                 const SizedBox(height: 12),
                 Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  SizedBox(width: 90, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text('PORT', style: _fieldMiniLabel()), const SizedBox(height: 6),
-                    TextField(controller: portCtrl, keyboardType: TextInputType.number, style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark), decoration: dec('9100')),
-                  ])),
-                  const SizedBox(width: 12),
+                  if (isNetwork) ...[
+                    SizedBox(width: 90, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text('PORT', style: _fieldMiniLabel()), const SizedBox(height: 6),
+                      TextField(controller: portCtrl, keyboardType: TextInputType.number, style: GoogleFonts.inter(fontSize: 13, color: AppColors.textDark), decoration: dec('9100')),
+                    ])),
+                    const SizedBox(width: 12),
+                  ],
                   Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Text('LANGUAGE', style: _fieldMiniLabel()), const SizedBox(height: 6),
                     Container(
@@ -6520,7 +6553,9 @@ end tell
                   child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     const Icon(Icons.info_outline_rounded, size: 15, color: AppColors.primary),
                     const SizedBox(width: 8),
-                    Expanded(child: Text('Uses the label Size (${_barcodeLabelW.toStringAsFixed(0)}×${_barcodeLabelH.toStringAsFixed(0)}mm) and Per Row ($_barcodePerRow) from the Print Barcodes screen. Give the printer a fixed IP on your router.',
+                    Expanded(child: Text(isUsb
+                        ? 'Uses label Size (${_barcodeLabelW.toStringAsFixed(0)}×${_barcodeLabelH.toStringAsFixed(0)}mm) and Per Row ($_barcodePerRow) from Print Barcodes. Bypasses the printer driver entirely — works even without a Mac driver.'
+                        : 'Uses label Size (${_barcodeLabelW.toStringAsFixed(0)}×${_barcodeLabelH.toStringAsFixed(0)}mm) and Per Row ($_barcodePerRow) from Print Barcodes. Give the printer a fixed IP on your router.',
                         style: GoogleFonts.inter(fontSize: 11.5, color: AppColors.primary, height: 1.4))),
                   ]),
                 ),
@@ -6528,12 +6563,14 @@ end tell
                 SizedBox(width: double.infinity, child: OutlinedButton.icon(
                   onPressed: () async {
                     final p = buildProfile();
-                    if (p.host.isEmpty) { _showToast('Enter the printer IP first', isError: true); return; }
+                    if (isUsb && p.queue.isEmpty) { _showToast('Select your USB printer first', isError: true); return; }
+                    if (isNetwork && p.host.isEmpty) { _showToast('Enter the printer IP first', isError: true); return; }
+                    final dest = isUsb ? p.queue : p.host;
                     try {
                       await LabelPrinterService.printTestLabel(currentSpec(), p);
-                      if (mounted) _showToast('Test label sent to ${p.host}');
+                      if (mounted) _showToast('Test label sent to $dest');
                     } catch (e) {
-                      if (mounted) _showToast('Could not reach printer: $e', isError: true);
+                      if (mounted) _showToast('Print failed: $e', isError: true);
                     }
                   },
                   icon: const Icon(Icons.science_outlined, size: 16),
@@ -6718,19 +6755,19 @@ end tell
                   ))),
                   const SizedBox(width: 6),
                   Tooltip(
-                    message: 'Network label printer setup',
+                    message: 'Raw label printer setup (USB / network)',
                     child: InkWell(
                       onTap: () async { await _showLabelPrinterSetup(); setLocal(() {}); },
                       borderRadius: BorderRadius.circular(7),
                       child: Container(
                         width: 30, height: 30,
                         decoration: BoxDecoration(
-                          color: LabelPrinterService.cached.isNetwork ? AppColors.primary.withValues(alpha: 0.1) : Colors.white,
+                          color: LabelPrinterService.cached.isRaw ? AppColors.primary.withValues(alpha: 0.1) : Colors.white,
                           borderRadius: BorderRadius.circular(7),
-                          border: Border.all(color: LabelPrinterService.cached.isNetwork ? AppColors.primary : AppColors.border),
+                          border: Border.all(color: LabelPrinterService.cached.isRaw ? AppColors.primary : AppColors.border),
                         ),
                         child: Icon(Icons.settings_ethernet_rounded, size: 15,
-                            color: LabelPrinterService.cached.isNetwork ? AppColors.primary : AppColors.textMuted),
+                            color: LabelPrinterService.cached.isRaw ? AppColors.primary : AppColors.textMuted),
                       ),
                     ),
                   ),
@@ -6971,7 +7008,8 @@ end tell
     // Raw path: if a network label printer is configured, send TSPL/ZPL straight
     // to it over TCP:9100 — pixel-perfect, no driver, no preview needed.
     final profile = LabelPrinterService.cached;
-    if (profile.isNetwork) {
+    if (profile.isRaw) {
+      final dest = profile.isUsb ? profile.queue : profile.host;
       final items = <LabelItem>[
         for (final p in products)
           LabelItem(
@@ -6984,9 +7022,9 @@ end tell
       final spec = LabelSpec(labelWmm: labelW, labelHmm: labelH, columns: labelsPerRow, gapMm: 2.0);
       try {
         await LabelPrinterService.printBatch(items, spec, profile);
-        if (mounted) _showToast('Sent to ${profile.host}');
+        if (mounted) _showToast('Sent to $dest');
       } catch (e) {
-        if (mounted) _showToast('Printer ${profile.host} unreachable: $e', isError: true);
+        if (mounted) _showToast('Printer $dest failed: $e', isError: true);
       }
       return;
     }
