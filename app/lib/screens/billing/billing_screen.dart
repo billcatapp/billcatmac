@@ -6359,26 +6359,44 @@ end tell
   // Live printer connection status. macOS: parse `lpstat -l -p` and look for the
   // `offline-report` alert CUPS raises when a USB/network printer is unreachable.
   // Returns a map keyed by printer display name → true (online) / false (offline).
-  Future<Map<String, bool>> _fetchPrinterOnlineMap() async {
-    final map = <String, bool>{};
+  /// Returns each printer's status: 'online', 'paused' (queue disabled/stopped by
+  /// the user), or 'offline' (unreachable / not responding). Absent = unknown.
+  Future<Map<String, String>> _fetchPrinterStatusMap() async {
+    final map = <String, String>{};
     if (!Platform.isMacOS) return map;
     try {
-      final res = await Process.run('/usr/bin/lpstat',['-l', '-p'])
+      final res = await Process.run('/usr/bin/lpstat', ['-l', '-p'])
           .timeout(const Duration(seconds: 3));
       final lines = '${res.stdout}'.split('\n');
       String? current;
-      bool offline = false;
+      String status = 'online';
       void commit() {
-        if (current != null) map[current!.replaceAll('_', ' ')] = !offline;
+        if (current != null) map[current!.replaceAll('_', ' ')] = status;
       }
+      bool looksOffline(String s) =>
+          s.contains('offline') || s.contains('not responding') ||
+          s.contains('connecting') || s.contains('unplugged') ||
+          s.contains('rejecting') || s.contains('powered off');
       for (final line in lines) {
-        final m = RegExp(r'^printer (\S+) is').firstMatch(line);
+        final m = RegExp(r'^printer (\S+) (.+)$').firstMatch(line);
         if (m != null) {
           commit();
           current = m.group(1);
-          offline = line.contains('disabled');
-        } else if (line.trimLeft().toLowerCase().startsWith('alerts:')) {
-          if (line.toLowerCase().contains('offline')) offline = true;
+          final rest = (m.group(2) ?? '').toLowerCase();
+          if (rest.contains('disabled') || rest.contains('stopped')) {
+            status = looksOffline(rest) ? 'offline' : 'paused';
+          } else {
+            status = 'online'; // idle / processing / enabled
+          }
+        } else {
+          final l = line.trimLeft().toLowerCase();
+          if (l.startsWith('alerts:') || l.startsWith('reasons:')) {
+            if (looksOffline(l)) {
+              status = 'offline';
+            } else if (status == 'online' && (l.contains('paused') || l.contains('stopped'))) {
+              status = 'paused';
+            }
+          }
         }
       }
       commit();
@@ -6561,7 +6579,7 @@ end tell
     final selected    = Map<String, bool>.from(_bulkPrintSelected);
     var printers      = <String>['System Default'];
     var printerObjects = <Printer>[];
-    var printerOnline = <String, bool>{};
+    var printerStatus = <String, String>{}; // name → 'online' | 'paused' | 'offline'
     String printer    = _barcodePrinter;
     String searchQ    = '';
     Timer? statusTimer;
@@ -6577,12 +6595,13 @@ end tell
         void refreshPrinters() {
           Printing.listPrinters().then((list) async {
             final names = <String>['System Default', ...list.map((p) => p.name)];
-            final online = await _fetchPrinterOnlineMap();
+            final status = await _fetchPrinterStatusMap();
             if (ctx.mounted) setLocal(() {
               printers = names;
               printerObjects = list;
-              printerOnline = online;
-              if (names.contains(_barcodePrinter)) printer = _barcodePrinter;
+              printerStatus = status;
+              // NOTE: never reassign `printer` here — the status timer calls this
+              // every few seconds and doing so would clobber the user's selection.
             });
           });
         }
@@ -6603,7 +6622,7 @@ end tell
         final total = _products.where((p) => selected[p.id] == true).fold<int>(0, (s, p) => s + (qtys[p.id] ?? 0));
 
         Future<void> doPrint() async {
-          if (!(total > 0 && printerOnline[printer] != false)) return;
+          if (!(total > 0 && printerStatus[printer] != 'offline')) return;
           final w = double.tryParse(labelWCtrl.text) ?? _barcodeLabelW;
           final h = double.tryParse(labelHCtrl.text) ?? _barcodeLabelH;
           final perRow = int.tryParse(perRowCtrl.text) ?? _barcodePerRow;
@@ -6667,15 +6686,20 @@ end tell
                     icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 14, color: AppColors.textMuted),
                     items: printers.map((n) {
                       Color dotColor;
+                      String? statusLabel;
                       if (n == 'System Default') {
                         dotColor = const Color(0xFF8E8E93);
                       } else {
-                        final online = printerOnline[n];
-                        dotColor = online == null
-                            ? const Color(0xFF8E8E93)          // unknown
-                            : online
-                                ? const Color(0xFF34C759)      // online
-                                : const Color(0xFFFF3B30);     // offline
+                        switch (printerStatus[n]) {
+                          case 'online':
+                            dotColor = const Color(0xFF34C759); break;   // green
+                          case 'paused':
+                            dotColor = const Color(0xFFFF9500); statusLabel = 'paused'; break; // orange
+                          case 'offline':
+                            dotColor = const Color(0xFFFF3B30); statusLabel = 'offline'; break; // red
+                          default:
+                            dotColor = const Color(0xFF8E8E93);          // grey / unknown
+                        }
                       }
                       return DropdownMenuItem(value: n,
                         child: Row(children: [
@@ -6683,6 +6707,10 @@ end tell
                             decoration: BoxDecoration(color: dotColor, shape: BoxShape.circle)),
                           const SizedBox(width: 6),
                           Expanded(child: Text(n, style: GoogleFonts.inter(fontSize: 12, color: AppColors.textDark), overflow: TextOverflow.ellipsis)),
+                          if (statusLabel != null) ...[
+                            const SizedBox(width: 6),
+                            Text(statusLabel, style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: dotColor)),
+                          ],
                         ]));
                     }).toList(),
                     onChanged: (v) => setLocal(() => printer = v ?? 'System Default'),
@@ -6865,7 +6893,9 @@ end tell
               // ── Footer ──
               Builder(builder: (_) {
               final isDefault = printer == 'System Default';
-              final isOffline = printerOnline[printer] == false;
+              final stat = printerStatus[printer];
+              final isOffline = stat == 'offline';
+              final isPaused = stat == 'paused';
               // System Default falls back to the OS default printer; only block
               // when there's nothing to print or the chosen printer is offline.
               final canPrint = total > 0 && !isOffline;
@@ -6875,11 +6905,14 @@ end tell
                   Flexible(child: Text(
                       isOffline
                           ? '$printer is offline — connect it to print'
-                          : isDefault
-                              ? '$total label${total != 1 ? 's' : ''} → system default printer'
-                              : '$total label${total != 1 ? 's' : ''} to print',
+                          : isPaused
+                              ? '$printer is paused — resume it to print (job will queue)'
+                              : isDefault
+                                  ? '$total label${total != 1 ? 's' : ''} → system default printer'
+                                  : '$total label${total != 1 ? 's' : ''} to print',
                       style: GoogleFonts.inter(fontSize: 12,
-                          color: isOffline ? const Color(0xFFFF3B30) : AppColors.textMuted),
+                          color: isOffline ? const Color(0xFFFF3B30)
+                              : isPaused ? const Color(0xFFFF9500) : AppColors.textMuted),
                       overflow: TextOverflow.ellipsis)),
                   const Spacer(),
                   OutlinedButton(
